@@ -5,9 +5,13 @@ using Godot;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.GameActions.Multiplayer;
+using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Platform;
+using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
+using MegaCrit.Sts2.Core.ValueProps;
 
 namespace DamageTracker;
 
@@ -197,9 +201,7 @@ internal static class ReflectionHelpers
                     typedPlayerKey = (ulong)RuntimeHelpers.GetHashCode(typedPlayer);
                 }
                 string typedDisplayName = TryGetPlatformDisplayName(typedPlayerKey)
-                    ?? typedPlayer.Creature.Name
-                    ?? typedPlayer.Character.Title?.ToString()
-                    ?? $"Player {typedPlayerKey}";
+                    ?? TryGetLocTitle(typedPlayer.Character.Title, $"Player {typedPlayerKey}");
                 string typedCharacterName = typedPlayer.Character.Id.Entry;
                 Texture2D? typedPortraitTexture = typedPlayer.Character.IconTexture;
 
@@ -295,6 +297,149 @@ internal static class ReflectionHelpers
         return false;
     }
 
+    public static bool TryResolveDamageEvent(
+        PlayerChoiceContext? choiceContext,
+        Creature? dealer,
+        DamageResult? results,
+        ValueProp props,
+        Creature? target,
+        CardModel? cardSource,
+        out DamageEvent hit)
+    {
+        hit = default;
+        Creature? receiver = results?.Receiver ?? target;
+        if (results == null || receiver is not { IsEnemy: true })
+            return false;
+
+        if (dealer != null && !IsPlayerCreature(dealer))
+            return false;
+
+        DamageSource source;
+        object? owner;
+        if (dealer == null && cardSource == null && StatusPowerPatches.TryGetPoisonApplier(receiver, out Creature? applier))
+        {
+            source = DamageSource.Poison;
+            owner = applier;
+        }
+        else if (dealer is { IsPet: true })
+        {
+            source = DamageSource.PetOrOrb;
+            owner = dealer.PetOwner;
+        }
+        else
+        {
+            AbstractModel? involvedModel = choiceContext?.LastInvolvedModel;
+            OrbModel? orb = involvedModel as OrbModel ?? StatusPowerPatches.GetActiveOrb();
+            if (orb != null)
+                source = DamageSource.PetOrOrb;
+            else if (cardSource != null || props.HasFlag(ValueProp.Move))
+                source = DamageSource.Direct;
+            else
+                source = DamageSource.Other;
+
+            owner = dealer?.Player ?? ResolveContextOwner(cardSource) ?? ResolveContextOwner(orb);
+            if (owner == null && dealer == null)
+                owner = ResolveContextOwner(involvedModel);
+        }
+
+        if (!TryResolvePlayerHandle(owner, out PlayerHandle player))
+            return false;
+
+        hit = new DamageEvent(player, source, TryResolveCardName(cardSource), results.UnblockedDamage,
+            results.WasTargetKilled, results.OverkillDamage);
+        return true;
+    }
+
+    private static Player? ResolveContextOwner(AbstractModel? model) => model switch
+    {
+        { IsMutable: false } => null,
+        CardModel card => card.Owner,
+        RelicModel relic => relic.Owner,
+        PotionModel potion => potion.Owner,
+        OrbModel orb => orb.Owner,
+        PowerModel power => power.Owner.Player ?? power.Owner.PetOwner ?? power.Applier?.Player ?? power.Applier?.PetOwner,
+        _ => null
+    };
+
+    public static string? TryResolveCardName(CardModel? cardSource)
+    {
+        if (cardSource == null)
+            return null;
+
+        try
+        {
+            string? title = cardSource.Title?.Trim();
+            if (!string.IsNullOrEmpty(title))
+                return title;
+        }
+        catch
+        {
+            // The card ID remains available when localization fails.
+        }
+
+        return cardSource.Id.Entry;
+    }
+
+    public static string TryGetLocTitle(LocString? loc, string fallback)
+    {
+        try
+        {
+            if (loc?.Exists() == true)
+            {
+                string? title = loc.GetFormattedText();
+                if (!string.IsNullOrWhiteSpace(title))
+                    return title;
+            }
+        }
+        catch
+        {
+            // Localization may be unavailable while the game loads.
+        }
+
+        return fallback;
+    }
+
+    public static string ResolveEncounterName(object? runState, object? combatState, object? room)
+    {
+        string title = ResolveEncounterTitle(room) ?? ResolveEncounterTitle(combatState) ?? "";
+        if (title.Length > 0)
+            return title;
+
+        try
+        {
+            object? currentRoom = runState is IRunState typedRunState
+                ? typedRunState.CurrentRoom
+                : TryGetMemberValue(runState, "CurrentRoom");
+            return ResolveEncounterTitle(currentRoom) ?? "";
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    private static string? ResolveEncounterTitle(object? source)
+    {
+        try
+        {
+            object? encounter = source switch
+            {
+                CombatRoom room => room.Encounter,
+                ICombatState combatState => combatState.Encounter,
+                _ => TryGetMemberValue(source, "Encounter")
+            };
+            LocString? loc = encounter is EncounterModel model
+                ? model.Title
+                : TryGetMemberValue(encounter, "Title") as LocString;
+            string title = TryGetLocTitle(loc, "");
+            return title.Length > 0 ? title : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private static object? FindPlayerCandidate(object source, int depth)
     {
         if (depth > 3)
@@ -358,7 +503,7 @@ internal static class ReflectionHelpers
                     yield return player;
                 }
                 yield break;
-            case CombatState combatState:
+            case ICombatState combatState:
                 foreach (Player player in combatState.Players)
                 {
                     yield return player;
@@ -422,7 +567,7 @@ internal static class ReflectionHelpers
         foreach (string memberName in NameMembers)
         {
             object? value = TryGetMemberValue(source, memberName);
-            string? text = value?.ToString();
+            string? text = value is LocString loc ? TryGetLocTitle(loc, "") : value?.ToString();
             if (!string.IsNullOrWhiteSpace(text))
             {
                 return text;
@@ -455,7 +600,8 @@ internal static class ReflectionHelpers
 
         foreach (string memberName in CharacterTitleMembers)
         {
-            string? titleText = TryGetMemberValue(character, memberName)?.ToString();
+            object? title = TryGetMemberValue(character, memberName);
+            string? titleText = title is LocString loc ? TryGetLocTitle(loc, "") : title?.ToString();
             if (!string.IsNullOrWhiteSpace(titleText) && !LooksLikeTypeName(titleText))
             {
                 return titleText;
@@ -525,8 +671,11 @@ internal static class ReflectionHelpers
         }
     }
 
-    private static object? TryGetMemberValue(object source, string memberName)
+    private static object? TryGetMemberValue(object? source, string memberName)
     {
+        if (source == null)
+            return null;
+
         Type type = source.GetType();
         BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
@@ -619,45 +768,35 @@ internal static class ReflectionHelpers
     {
         applier = null;
         amount = 0;
-        
-        if (creature == null) return;
-        
+
+        if (creature is Creature typedCreature)
+        {
+            foreach (PowerModel power in typedCreature.Powers)
+            {
+                if (power.GetType().Name.StartsWith(powerTypeName, StringComparison.OrdinalIgnoreCase))
+                {
+                    applier = power.Applier;
+                    amount = power.Amount;
+                    return;
+                }
+            }
+
+            return;
+        }
+
         try
         {
-            // 尝试获取Powers集合
-            var powersField = creature.GetType().GetField("Powers", BindingFlags.Public | BindingFlags.Instance);
-            if (powersField == null)
+            if ((TryGetMemberValue(creature, "Powers") ?? TryGetMemberValue(creature, "_powers"))
+                is not System.Collections.IEnumerable powers)
+                return;
+
+            foreach (object? power in powers)
             {
-                powersField = creature.GetType().GetField("_powers", BindingFlags.Public | BindingFlags.Instance);
-            }
-            
-            if (powersField == null) return;
-            
-            var powers = powersField.GetValue(creature) as System.Collections.IEnumerable;
-            if (powers == null) return;
-            
-            foreach (var power in powers)
-            {
-                if (power == null) continue;
-                
-                var type = power.GetType();
-                var typeName = type.Name;
-                
-                // 检查是否是目标Power类型
-                if (!typeName.StartsWith(powerTypeName, StringComparison.OrdinalIgnoreCase) &&
-                    !typeName.Equals(powerTypeName, StringComparison.OrdinalIgnoreCase))
-                {
+                if (power == null || !power.GetType().Name.StartsWith(powerTypeName, StringComparison.OrdinalIgnoreCase))
                     continue;
-                }
-                
-                // 获取Amount
-                var amountProp = type.GetProperty("Amount");
-                amount = amountProp?.GetValue(power) as int? ?? 0;
-                
-                // 获取Applier
-                var applierField = type.GetField("_applier", BindingFlags.Public | BindingFlags.Instance);
-                applier = applierField?.GetValue(power);
-                
+
+                amount = TryGetMemberValue(power, "Amount") is int powerAmount ? powerAmount : 0;
+                applier = TryGetMemberValue(power, "Applier") ?? TryGetMemberValue(power, "_applier");
                 return;
             }
         }

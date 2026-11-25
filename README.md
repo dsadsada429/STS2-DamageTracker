@@ -4,33 +4,33 @@
 
 Damage Tracker is a Slay the Spire 2 mod (community fork based on [BAIGUANGMEI/STS2-DamageTracker](https://github.com/BAIGUANGMEI/STS2-DamageTracker)) that shows a draggable, resizable in-combat overlay with per-player damage statistics for the current run.
 
-The overlay is designed to stay readable during multiplayer combat and supports:
+The overlay is designed for multiplayer and solo runs and supports:
 
-- expanded mode and compact mode
-- side-hidden mode with a small restore tab
-- free window resizing via a bottom-right drag grip (with separate remembered widths for expanded and compact modes)
-- `Ctrl + Mouse Wheel` UI scaling (`0.7x` – `2.5x`)
-- persistent UI layout settings (position, width, height, scale, and expanded/compact state)
-- adaptive height with scrolling when the player list grows or the viewport resizes
+- expanded mode, compact mode, and side-hidden mode with a restore tab
+- clickable column sorting (`%`, `Total`, `Combat`, `Turn`, `Last`, `Max`)
+- damage source breakdown (`Direct`, `Poison`, `Doom`, `Pet / Orb`, `Other`) and Top 3 highest-damage cards in row hover tooltips
+- completed combat history switcher (`Run` + each completed fight with encounter name)
+- one-click battle report copy to clipboard (with Damage MVP and Finisher callouts)
+- anti-misclick controls: click-through lock (`F9`), master visibility toggle (`F8`), out-of-combat auto-dim, and background opacity presets
+- free window resizing via a bottom-right drag grip and `Ctrl + Mouse Wheel` UI scaling (`0.7x` – `2.5x`)
+- persistent UI layout settings and backward-compatible run state checkpoints
 - resilient teammate row rendering even when character textures unload
-- stable display across consecutive runs
 
-Current version: `0.4.0`
+Current version: `0.5.0`
 
 ## Features
 
-- Track total damage for each player across the current run
-- Track damage dealt in the current combat
-- Track last hit damage and max hit damage
-- Highlight the currently active player with character theme colors and damage share bars
-- Show player display name, character name, and portrait when available (gracefully falls back to initials if a texture is unavailable or unloaded)
-- Compact formatting (`k` / `M`) for large numbers in table cells, with full exact stats on row hover tooltips
-- Support drag-and-drop repositioning
-- Support bottom-right grip resizing and `Ctrl + Mouse Wheel` UI scaling (double-click the grip to reset layout defaults)
-- Persist overlay layout (`scale`, `width`, `compact_width`, `height`, `x`, `y`, `expanded`) in `user://damage_tracker_ui.json`
-- Support expanded, compact, and side-hidden UI states
-- Refresh state automatically when combat starts and ends
-- Keep the overlay stable across multiple back-to-back runs
+- Track total run damage, current combat damage, current turn damage, last hit, max hit, kills, and overkill damage per player
+- Classify damage by source (`Direct`, `Poison`, `Doom`, `Pet / Orb`, `Other`) — including turn-start & card-triggered Poison (`Outbreak`), Necrobinder pets (`Osty`), and orb passive/evoke damage — while filtering out player self-damage
+- Show Top 3 highest-damage cards and source shares in row hover tooltips (for both Run and Combat views)
+- Switch between live `Run` stats and completed combat history snapshots (`‹` / `›`)
+- Click any stat column header in expanded mode to sort descending/ascending
+- Copy a clean plain-text battle report (with Damage MVP & Finisher awards) to the clipboard in one click
+- Highlight the currently active player with character theme colors, damage share bars, and a brief gold border flash on new personal max hits
+- Lock overlay in full click-through mode (`F9` or lock button), toggle visibility (`F8`), enable out-of-combat auto-dim, and cycle background opacity (`0.70` / `0.45` / `0.88`)
+- Drag-and-drop repositioning, bottom-right grip resizing (double-click to reset), and `Ctrl + Mouse Wheel` UI scaling (`0.7x` – `2.5x`)
+- Persist UI layout (`scale`, `width`, `compact_width`, `height`, `x`, `y`, `expanded`, `locked`, `auto_dim`, `background_opacity`) in `user://damage_tracker_ui.json`
+- Built-in English & Simplified Chinese fallback localization (overrides still loaded from `assets/localization/{lang}/damage_tracker.json`)
 
 ## Installation
 
@@ -56,46 +56,43 @@ Slay the Spire 2/
 ## Usage
 
 - Enter a combat to create the overlay
-- Drag the panel with the left mouse button to reposition it (position is saved automatically)
-- Drag the bottom-right corner grip to resize the panel width and height
-- Double-click the bottom-right corner grip to reset scale, width, and height to defaults
-- Hold `Ctrl` and scroll the mouse wheel over the panel to scale the UI (`0.7x` – `2.5x`)
-- Hover over any player row to view exact un-abbreviated damage statistics
-- Use the top-right toggle button (`▼` / `▶`) to switch between expanded and compact mode
-- Use the side-hide button (`»` / `«`) to collapse the panel to the left or right screen edge, and click the side tab to restore it
-- When there are many players or the panel height is reduced, the list becomes scrollable automatically
+- **Move & Resize**: drag the panel with left mouse button; drag the bottom-right grip to resize (double-click grip to reset defaults); hold `Ctrl` + scroll wheel over the panel to scale (`0.7x` – `2.5x`)
+- **Hotkeys**: press `F8` to show/hide the overlay; press `F9` to lock/unlock click-through mode
+- **Header buttons**:
+  - `Cp`: copy formatted battle report for the active view (Run or selected combat) to clipboard
+  - `Op`: cycle background opacity (`70%` → `45%` → `88%`)
+  - `Dm`: toggle out-of-combat auto-dim (`35%` alpha outside combat)
+  - `Lk`: toggle click-through lock mode (`F9` unlocks)
+  - `▼` / `▶`: switch between expanded and compact mode
+  - `»` / `«`: collapse to the left or right screen edge (click the side tab to restore)
+- **Scope switcher (`‹ [scope] ›`)**: browse between `Run` and completed fights in chronological order
+- **Sorting & Tooltips**: click any column header (`%`, `Total`, `Combat`, `Turn`, `Last`, `Max`) to sort; hover any player row for exact numbers, kills, overkill, source breakdown, and Top 3 cards
 
 ## Damage Tracking Rules
 
-- Direct damage is recorded from the game's actual `DamageResult.UnblockedDamage`
-- Poison damage is tracked from actual resolved damage events rather than predicted stack values
-- Doom damage is tracked only from the actual Doom kill flow and uses the target's HP before death
-- Player ownership is resolved through typed STS2 APIs first (with hash-code fallback when `NetId == 0`), and reflection fallback when needed
-
-## Technical Notes
-
-- Harmony is used to patch STS2 hooks and selected power methods
-- The UI is rendered through a Godot `CanvasLayer`
-- Run identity is based on `RunState.Rng.StringSeed`
-- Run damage state is saved to `user://damage_tracker_state.json`, and overlay layout settings are saved to `user://damage_tracker_ui.json`
-- The tracker seeds known players at run/combat start so the overlay does not depend on who acts first
-- Cached and runtime `Texture2D` instances are validated before binding, and per-row rendering is isolated with a fallback row so unloaded textures never drop teammates from the table
+- Direct damage is recorded from the game's actual `DamageResult.UnblockedDamage` on enemy receivers (player self-damage such as `Offering` / `Bloodletting` is excluded)
+- Poison damage is captured via `PoisonPower.Trigger()`, covering both turn-start ticks and card-triggered Poison (e.g. `Outbreak`)
+- Doom damage is tracked from the actual `DoomPower.DoomKill` / `Hook.AfterDiedToDoom` flow using pre-death HP
+- Pet (`Creature.IsPet` / `PetOwner`) and Orb (`OrbModel` evoke & turn-end passive) damage is classified under `Pet / Orb`
+- Player ownership uses typed STS2 v0.113.0 APIs (`ICombatState`, `DamageResult`, `CardModel`, `PlayerChoiceContext`) first, with `NetId == 0` hash fallback and reflection fallback when needed
+- Pre-combat checkpoints prevent Save & Quit mid-combat reloads from double-counting an aborted attempt
 
 ## Project Structure
 
-- `src/ModEntry.cs`: mod entry point and Harmony patch registration
-- `src/RunDamageTrackerService.cs`: damage aggregation and state management
-- `src/ReflectionHelpers.cs`: runtime object and player ownership resolution helpers
-- `src/DamageTrackerOverlay.cs`: overlay UI, resizing, scaling, layout persistence, and resilient rendering
+- `src/ModEntry.cs`: mod entry point, `ICombatState` Harmony patches, and Poison/Doom/Orb async context tracking
+- `src/RunDamageTrackerService.cs`: damage aggregation, source/card breakdowns, combat history, checkpoints, and atomic persistence
+- `src/BattleReportFormatter.cs`: plain-text battle report & MVP/Finisher formatter
+- `src/ReflectionHelpers.cs`: runtime object, card title, encounter name, and damage-event resolution helpers
+- `src/DamageTrackerOverlay.cs`: overlay UI, sorting, history switcher, lock/hotkeys, opacity/auto-dim, resizing, scaling, built-in localization fallback, and resilient rendering
+- `assets/localization/{eng,zhs}/damage_tracker.json`: English and Simplified Chinese localization files
 - `DamageTracker.csproj`: project file and game reference configuration
-- `DamageTracker.json`: STS2 mod metadata
-- `mod_manifest.json`: mod manifest
+- `DamageTracker.json` & `mod_manifest.json`: mod metadata and manifest
 - `project.godot`: Godot project configuration
 
 ## Build Requirements
 
 - Windows
-- .NET SDK 10
+- .NET SDK 9 / 10
 - Godot .NET SDK 4.5.1
 - Slay the Spire 2 installed locally
 
@@ -139,6 +136,15 @@ Slay the Spire 2\mods\DamageTracker\
 
 ## Changelog
 
+### v0.5.0
+
+- Added damage source breakdown (`Direct`, `Poison`, `Doom`, `Pet / Orb`, `Other`) and per-player Top 3 highest-damage cards in row hover tooltips
+- Added per-turn damage (`Turn`), kills, overkill tracking, and clickable column header sorting (`%`, `Total`, `Combat`, `Turn`, `Last`, `Max`)
+- Added completed combat history switcher (`Run` + each completed fight with encounter name) and one-click clipboard battle report copy (`BattleReportFormatter`) with Damage MVP & Finisher awards
+- Added click-through lock mode (`F9`, including internal scrollbars and docked side tab), master visibility toggle (`F8`), out-of-combat auto-dim, background opacity presets (`0.70` / `0.45` / `0.88`), and personal max-hit gold border flash
+- Updated Harmony hooks to exact STS2 v0.113.0 `ICombatState` signatures, captured attribution in `AfterDamageGiven` prefix, patched `PoisonPower.Trigger()` (fixing `Outbreak`), filtered out player self-damage, and added pre-combat checkpoints to prevent Save & Quit double-counting
+- Embedded built-in `eng` and `zhs` localization fallbacks alongside updated JSON files so all new UI strings work even without re-exporting `DamageTracker.pck`
+
 ### v0.4.0
 
 - Added resizable overlay window via bottom-right drag grip (with double-click to reset defaults)
@@ -166,30 +172,13 @@ Verify that `Sts2Dir` in `DamageTracker.csproj` points to your actual game insta
 
 If the game is running, `DamageTracker.dll` may be locked by `SlayTheSpire2.exe`. Close the game and build again.
 
-### The overlay does not appear after a new run starts
+### Locked panel won't respond to clicks
 
-Use `0.3.0` or later. The tracker now seeds known players at run/combat start and handles consecutive runs more reliably.
-
-### Player names or portraits are missing
-
-The mod prefers platform/player data from the game runtime and falls back to reflection-based resolution. If a character texture unloads or is unavailable, the overlay safely falls back to colored initials. If the game updates internal fields, `ReflectionHelpers.cs` may need adjustment.
+Press `F9` to unlock click-through mode.
 
 ### Resetting overlay position, size, or scale
 
 Double-click the bottom-right resize grip to reset scale, width, and height, or edit/delete `damage_tracker_ui.json` in the game's user data directory while the game is closed.
-
-## Development Notes
-
-This repository is intended for source learning and mod development practice. Keep source files, project files, and manifests in version control, and avoid committing generated caches or local temporary files.
-
-The repository already ignores typical generated content such as:
-
-- `.godot/`
-- `bin/`
-- `obj/`
-- `.vs/`
-- `*.dll`
-- `*.pck`
 
 ## License
 

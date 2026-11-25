@@ -10,6 +10,7 @@ using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Modding;
+using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.ValueProps;
 
@@ -28,13 +29,21 @@ public static class ModEntry
         }
 
         _harmony = new Harmony("com.example.sts2.damage_tracker");
-        PatchHook(nameof(Hook.BeforeCombatStart), nameof(HookPatches.BeforeCombatStartPostfix));
-        PatchHook(nameof(Hook.AfterCombatEnd), nameof(HookPatches.AfterCombatEndPostfix));
-        PatchHook(nameof(Hook.AfterPlayerTurnStart), nameof(HookPatches.AfterPlayerTurnStartPostfix));
-        PatchHook(nameof(Hook.AfterDamageGiven), nameof(HookPatches.AfterDamageGivenPostfix));
-        PatchHook(nameof(Hook.AfterDiedToDoom), nameof(HookPatches.AfterDiedToDoomPostfix));
-        PatchMethod(typeof(PoisonPower), nameof(PoisonPower.AfterSideTurnStart), nameof(StatusPowerPatches.PoisonAfterSideTurnStartPrefix), nameof(StatusPowerPatches.PoisonAfterSideTurnStartPostfix));
-        PatchMethod(typeof(DoomPower), nameof(DoomPower.DoomKill), nameof(StatusPowerPatches.DoomKillPrefix));
+        PatchHook(nameof(Hook.BeforeCombatStart), prefix: nameof(HookPatches.BeforeCombatStartPrefix));
+        PatchHook(nameof(Hook.AfterCombatEnd), postfix: nameof(HookPatches.AfterCombatEndPostfix));
+        PatchHook(nameof(Hook.BeforeSideTurnStart), prefix: nameof(HookPatches.BeforeSideTurnStartPrefix));
+        PatchHook(nameof(Hook.AfterPlayerTurnStart), postfix: nameof(HookPatches.AfterPlayerTurnStartPostfix));
+        PatchHook(nameof(Hook.AfterDamageGiven), prefix: nameof(HookPatches.AfterDamageGivenPrefix));
+        PatchHook(nameof(Hook.AfterDiedToDoom), postfix: nameof(HookPatches.AfterDiedToDoomPostfix));
+        PatchRequiredMethod(typeof(PoisonPower), nameof(PoisonPower.Trigger), typeof(StatusPowerPatches),
+            prefix: nameof(StatusPowerPatches.PoisonTriggerPrefix),
+            postfix: nameof(StatusPowerPatches.CompleteDamageContextPostfix),
+            finalizer: nameof(StatusPowerPatches.RestoreDamageContextOnException));
+        PatchRequiredMethod(typeof(DoomPower), nameof(DoomPower.DoomKill), typeof(StatusPowerPatches),
+            prefix: nameof(StatusPowerPatches.DoomKillPrefix),
+            postfix: nameof(StatusPowerPatches.DoomKillPostfix),
+            finalizer: nameof(StatusPowerPatches.DoomKillFinalizer));
+        PatchOrbTurnEndMethods();
 
         // 手动加载PCK文件到res://
         string modDir = System.IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location) ?? "";
@@ -64,45 +73,77 @@ public static class ModEntry
         Log.Info("DamageTracker initialized");
     }
 
-    private static void PatchHook(string hookName, string postfixName)
+    private static void PatchHook(string name, string? prefix = null, string? postfix = null)
     {
-        MethodInfo original = AccessTools.Method(typeof(Hook), hookName)
-            ?? throw new MissingMethodException(typeof(Hook).FullName, hookName);
-        MethodInfo postfix = AccessTools.Method(typeof(HookPatches), postfixName)
-            ?? throw new MissingMethodException(typeof(HookPatches).FullName, postfixName);
-
-        _harmony!.Patch(original, postfix: new HarmonyMethod(postfix));
+        PatchRequiredMethod(typeof(Hook), name, typeof(HookPatches), prefix, postfix);
     }
 
-    private static void PatchMethod(Type ownerType, string methodName, string? prefixName = null, string? postfixName = null)
+    private static void PatchRequiredMethod(Type ownerType, string methodName, Type patchType,
+        string? prefix = null, string? postfix = null, string? finalizer = null)
     {
         MethodInfo original = AccessTools.Method(ownerType, methodName)
             ?? throw new MissingMethodException(ownerType.FullName, methodName);
-        HarmonyMethod? prefix = prefixName != null
-            ? new HarmonyMethod(AccessTools.Method(typeof(StatusPowerPatches), prefixName)
-                ?? throw new MissingMethodException(typeof(StatusPowerPatches).FullName, prefixName))
-            : null;
-        HarmonyMethod? postfix = postfixName != null
-            ? new HarmonyMethod(AccessTools.Method(typeof(StatusPowerPatches), postfixName)
-                ?? throw new MissingMethodException(typeof(StatusPowerPatches).FullName, postfixName))
-            : null;
+        _harmony!.Patch(original, prefix: ResolvePatch(patchType, prefix), postfix: ResolvePatch(patchType, postfix),
+            finalizer: ResolvePatch(patchType, finalizer));
+    }
 
-        _harmony!.Patch(original, prefix: prefix, postfix: postfix);
+    private static HarmonyMethod? ResolvePatch(Type patchType, string? name)
+    {
+        if (name == null)
+            return null;
+
+        return new HarmonyMethod(AccessTools.Method(patchType, name)
+            ?? throw new MissingMethodException(patchType.FullName, name));
+    }
+
+    private static void PatchOrbTurnEndMethods()
+    {
+        try
+        {
+            foreach (Type type in AccessTools.GetTypesFromAssembly(typeof(OrbModel).Assembly))
+            {
+                if (typeof(OrbModel).IsAssignableFrom(type))
+                    TryPatchMethod(type, "BeforeTurnEndOrbTrigger");
+            }
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[DamageTracker] Could not discover optional orb hooks: {ex.Message}");
+        }
+    }
+
+    private static void TryPatchMethod(Type ownerType, string name)
+    {
+        try
+        {
+            MethodInfo? original = AccessTools.DeclaredMethod(ownerType, name, new[] { typeof(PlayerChoiceContext) });
+            if (original == null || original.IsStatic || original.IsAbstract || original.ReturnType != typeof(Task))
+                return;
+
+            Type patches = typeof(StatusPowerPatches);
+            _harmony!.Patch(original,
+                prefix: ResolvePatch(patches, nameof(StatusPowerPatches.OrbBeforeTurnEndPrefix)),
+                postfix: ResolvePatch(patches, nameof(StatusPowerPatches.CompleteDamageContextPostfix)),
+                finalizer: ResolvePatch(patches, nameof(StatusPowerPatches.RestoreDamageContextOnException)));
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[DamageTracker] Could not patch optional orb hook {ownerType.Name}.{name}: {ex.Message}");
+        }
     }
 }
 
 internal static class HookPatches
 {
     private static bool _overlayScheduled;
-    
-    // Hook signature:
-    // BeforeCombatStart(IRunState runState, CombatState? combatState)
-    public static void BeforeCombatStartPostfix(IRunState? runState, CombatState? combatState)
+
+    public static void BeforeCombatStartPrefix(IRunState? runState, ICombatState? combatState)
     {
+        StatusPowerPatches.ClearStaleDoomDamage(combatState);
         RunDamageTrackerService.BeginRun(runState);
-        RunDamageTrackerService.BeginCombat(runState, combatState);
-        
-        // Create overlay when first combat starts (game loop is guaranteed to be ready by now)
+        RunDamageTrackerService.BeginCombat(runState, combatState,
+            ReflectionHelpers.ResolveEncounterName(runState, combatState, null));
+
         if (!_overlayScheduled)
         {
             _overlayScheduled = true;
@@ -110,72 +151,288 @@ internal static class HookPatches
         }
     }
 
-    // Hook signature:
-    // AfterCombatEnd(IRunState runState, CombatState? combatState, CombatRoom room)
-    public static void AfterCombatEndPostfix(IRunState? runState, CombatState? combatState)
+    public static void AfterCombatEndPostfix(IRunState? runState, ICombatState? combatState, CombatRoom? room,
+        ref Task __result)
     {
-        RunDamageTrackerService.EndCombat();
+        __result = EndCombatAsync(__result, runState, combatState, room);
     }
 
-    // Hook signature:
-    // AfterPlayerTurnStart(CombatState combatState, PlayerChoiceContext choiceContext, Player player)
-    public static void AfterPlayerTurnStartPostfix(CombatState combatState, PlayerChoiceContext? choiceContext, Player player)
+    private static async Task EndCombatAsync(Task original, IRunState? runState, ICombatState? combatState, CombatRoom? room)
     {
-        RunDamageTrackerService.EnsurePlayersRegistered(combatState.RunState, combatState);
-        RunDamageTrackerService.NotePlayer(player);
+        try
+        {
+            await original;
+        }
+        finally
+        {
+            StatusPowerPatches.ClearPendingDoomDamageForCombat(combatState);
+            RunDamageTrackerService.EndCombat(combatState, ReflectionHelpers.ResolveEncounterName(runState, combatState, room));
+        }
     }
 
-    // Hook signature:
-    // AfterDamageGiven(PlayerChoiceContext choiceContext, CombatState combatState, 
-    //                   Creature? dealer, DamageResult results, ValueProp props, 
-    //                   Creature target, CardModel? cardSource)
-    public static void AfterDamageGivenPostfix(
+    public static void BeforeSideTurnStartPrefix(ICombatState? combatState, CombatSide side,
+        IReadOnlyList<Creature>? participants)
+    {
+        if (side == CombatSide.Player)
+            RunDamageTrackerService.BeginPlayerTurn(combatState);
+    }
+
+    public static void AfterPlayerTurnStartPostfix(ICombatState? combatState, PlayerChoiceContext? choiceContext,
+        Player? player)
+    {
+        RunDamageTrackerService.EnsurePlayersRegisteredForCombat(combatState, combatState?.RunState, combatState);
+        if (player != null)
+            RunDamageTrackerService.NotePlayerForCombat(combatState, player);
+    }
+
+    public static void AfterDamageGivenPrefix(
         PlayerChoiceContext? choiceContext,
-        CombatState? combatState,
+        ICombatState? combatState,
         Creature? dealer,
         DamageResult? results,
         ValueProp props,
         Creature? target,
         CardModel? cardSource)
     {
-        // Only record damage dealt by player creatures; skip enemy/monster damage
-        if (dealer != null && !ReflectionHelpers.IsPlayerCreature(dealer))
-            return;
+        RunDamageTrackerService.EnsurePlayersRegisteredForCombat(combatState, combatState?.RunState, combatState);
 
-        RunDamageTrackerService.EnsurePlayersRegistered(combatState?.RunState, combatState);
-
-        if (RunDamageTrackerService.TryRecordPoisonDamage(dealer, target, cardSource, results))
-            return;
-
-        RunDamageTrackerService.RecordDamage(dealer, results, target, cardSource);
+        if (ReflectionHelpers.TryResolveDamageEvent(choiceContext, dealer, results, props, target, cardSource, out DamageEvent hit))
+            RunDamageTrackerService.RecordDamage(combatState, hit);
     }
 
-    // Hook signature:
-    // AfterDiedToDoom(CombatState combatState, IReadOnlyList<Creature> creatures)
-    public static void AfterDiedToDoomPostfix(CombatState combatState, System.Collections.Generic.IReadOnlyList<Creature>? creatures)
+    public static void AfterDiedToDoomPostfix(ICombatState? combatState, IReadOnlyList<Creature>? creatures)
     {
-        // 灾厄斩杀伤害归属
-        if (creatures != null)
+        if (creatures == null)
+            return;
+
+        foreach (Creature creature in creatures)
         {
-            RunDamageTrackerService.RecordDoomDamage(combatState, creatures);
+            if (StatusPowerPatches.TryConsumeDoomDamage(combatState, creature, out DamageEvent hit))
+                RunDamageTrackerService.RecordDamage(combatState, hit);
         }
     }
 }
 
 internal static class StatusPowerPatches
 {
-    public static void PoisonAfterSideTurnStartPrefix(PoisonPower __instance, CombatSide side, out object? __state)
+    private static readonly AsyncLocal<DamageContext?> CurrentContext = new();
+    private static readonly object DoomSyncRoot = new();
+    private static readonly Dictionary<Creature, PendingDoomDamage> PendingDoomByCreature = new(ReferenceEqualityComparer.Instance);
+
+    internal sealed class DamageContext(DamageContext? previous, Creature? target, Creature? applier, OrbModel? orb)
     {
-        __state = RunDamageTrackerService.BeginPoisonTracking(__instance, side);
+        public DamageContext? Previous { get; } = previous;
+        public Creature? Target { get; } = target;
+        public Creature? Applier { get; } = applier;
+        public OrbModel? Orb { get; } = orb;
+        public volatile bool Active = true;
     }
 
-    public static void PoisonAfterSideTurnStartPostfix(ref Task __result, object? __state)
+    private readonly record struct PendingDoomDamage(ICombatState CombatState, PlayerHandle Player, int PreDeathHp);
+
+    public static void PoisonTriggerPrefix(PoisonPower __instance, out DamageContext? __state)
     {
-        __result = RunDamageTrackerService.CompletePoisonTrackingAsync(__result, __state);
+        Creature target = __instance.Owner;
+        __state = null;
+        if (target.IsEnemy)
+        {
+            __state = new DamageContext(CurrentContext.Value, target, __instance.Applier, null);
+            CurrentContext.Value = __state;
+        }
     }
 
-    public static void DoomKillPrefix(System.Collections.Generic.IReadOnlyList<Creature> creatures)
+    public static void OrbBeforeTurnEndPrefix(OrbModel __instance, out DamageContext __state)
     {
-        RunDamageTrackerService.CapturePendingDoomDamage(creatures);
+        __state = new DamageContext(CurrentContext.Value, null, null, __instance);
+        CurrentContext.Value = __state;
+    }
+
+    public static void CompleteDamageContextPostfix(ref Task __result, DamageContext? __state)
+    {
+        if (__state == null)
+            return;
+
+        // The original async method captured the context. Restore the caller's context now.
+        CurrentContext.Value = __state.Previous;
+        __result = CompleteDamageContextAsync(__result, __state);
+    }
+
+    private static async Task CompleteDamageContextAsync(Task original, DamageContext context)
+    {
+        try
+        {
+            await original;
+        }
+        finally
+        {
+            context.Active = false;
+        }
+    }
+
+    public static void RestoreDamageContextOnException(Exception? __exception, DamageContext? __state)
+    {
+        if (__exception != null && __state != null && ReferenceEquals(CurrentContext.Value, __state))
+        {
+            CurrentContext.Value = __state.Previous;
+            __state.Active = false;
+        }
+    }
+
+    public static bool TryGetPoisonApplier(Creature receiver, out Creature? applier)
+    {
+        for (DamageContext? context = CurrentContext.Value; context != null; context = context.Previous)
+        {
+            if (context.Active && ReferenceEquals(context.Target, receiver))
+            {
+                applier = context.Applier;
+                return true;
+            }
+        }
+
+        applier = null;
+        return false;
+    }
+
+    public static OrbModel? GetActiveOrb()
+    {
+        for (DamageContext? context = CurrentContext.Value; context != null; context = context.Previous)
+        {
+            if (context.Active && context.Orb is OrbModel orb)
+                return orb;
+        }
+
+        return null;
+    }
+
+    public static void DoomKillPrefix(IReadOnlyList<Creature>? creatures, out List<Creature>? __state)
+    {
+        __state = null;
+        if (creatures == null || creatures.Count == 0)
+            return;
+
+        List<Creature> captured = new();
+        lock (DoomSyncRoot)
+        {
+            foreach (Creature creature in creatures)
+            {
+                if (!creature.IsEnemy || creature.CurrentHp <= 0 || creature.CombatState == null)
+                    continue;
+
+                Creature? applier = creature.GetPower<DoomPower>()?.Applier;
+                if (ReflectionHelpers.IsPlayerCreature(applier) && ReflectionHelpers.TryResolvePlayerHandle(applier, out PlayerHandle player))
+                {
+                    PendingDoomByCreature[creature] = new PendingDoomDamage(creature.CombatState, player, creature.CurrentHp);
+                    captured.Add(creature);
+                }
+            }
+        }
+
+        if (captured.Count > 0)
+            __state = captured;
+    }
+
+    public static void DoomKillPostfix(ref Task __result, List<Creature>? __state)
+    {
+        if (__state == null || __state.Count == 0)
+            return;
+
+        __result = CleanupDoomAfterTaskAsync(__result, __state);
+    }
+
+    public static void DoomKillFinalizer(Exception? __exception, List<Creature>? __state)
+    {
+        if (__exception != null && __state != null)
+            RemovePendingDoomEntries(__state);
+    }
+
+    private static async Task CleanupDoomAfterTaskAsync(Task original, List<Creature> captured)
+    {
+        try
+        {
+            await original;
+        }
+        finally
+        {
+            RemovePendingDoomEntries(captured);
+        }
+    }
+
+    private static void RemovePendingDoomEntries(List<Creature> captured)
+    {
+        lock (DoomSyncRoot)
+        {
+            foreach (Creature creature in captured)
+                PendingDoomByCreature.Remove(creature);
+        }
+    }
+
+    public static bool TryConsumeDoomDamage(ICombatState? combatState, Creature creature, out DamageEvent hit)
+    {
+        lock (DoomSyncRoot)
+        {
+            if (PendingDoomByCreature.TryGetValue(creature, out PendingDoomDamage pending)
+                && (combatState == null || ReferenceEquals(pending.CombatState, combatState)))
+            {
+                PendingDoomByCreature.Remove(creature);
+                hit = new DamageEvent(pending.Player, DamageSource.Doom, null, pending.PreDeathHp, IsKill: true, OverkillDamage: 0m);
+                return true;
+            }
+        }
+
+        hit = default;
+        return false;
+    }
+
+    public static void ClearPendingDoomDamageForCombat(ICombatState? combatState)
+    {
+        if (combatState == null)
+            return;
+
+        lock (DoomSyncRoot)
+        {
+            List<Creature>? toRemove = null;
+            foreach (KeyValuePair<Creature, PendingDoomDamage> kv in PendingDoomByCreature)
+            {
+                if (ReferenceEquals(kv.Value.CombatState, combatState))
+                {
+                    toRemove ??= new List<Creature>();
+                    toRemove.Add(kv.Key);
+                }
+            }
+
+            if (toRemove != null)
+            {
+                foreach (Creature c in toRemove)
+                    PendingDoomByCreature.Remove(c);
+            }
+        }
+    }
+
+    public static void ClearStaleDoomDamage(ICombatState? activeCombatState)
+    {
+        lock (DoomSyncRoot)
+        {
+            if (activeCombatState == null)
+            {
+                PendingDoomByCreature.Clear();
+                return;
+            }
+
+            List<Creature>? toRemove = null;
+            foreach (KeyValuePair<Creature, PendingDoomDamage> kv in PendingDoomByCreature)
+            {
+                if (!ReferenceEquals(kv.Value.CombatState, activeCombatState))
+                {
+                    toRemove ??= new List<Creature>();
+                    toRemove.Add(kv.Key);
+                }
+            }
+
+            if (toRemove != null)
+            {
+                foreach (Creature c in toRemove)
+                    PendingDoomByCreature.Remove(c);
+            }
+        }
     }
 }
