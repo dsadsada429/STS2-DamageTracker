@@ -1,77 +1,78 @@
+using System.Globalization;
+using System.Reflection;
+using System.Text;
 using System.Text.Json;
 using Godot;
 
 namespace DamageTracker;
 
 /// <summary>
-/// Flat, table-style damage overlay. Simple colors, clear columns, no overlap.
+/// Flat, table-style damage overlay. Supports dragging, resizing, Ctrl+Wheel scaling,
+/// persistent UI layout settings, and resilient avatar/row rendering.
 /// </summary>
 public sealed partial class DamageTrackerOverlay : CanvasLayer
 {
-    private const float ExpandedWidth = 440f;
-    private const float CompactWidth = 248f;
     private const float SideTabWidth = 86f;
     private const float SideTabHeight = 32f;
-    private const float ViewportMargin = 16f;
-    private const float MinPanelHeight = 72f;
+    private const float ViewportMargin = 12f;
+    private const float MinPanelHeight = 64f;
+    private const float MinUiScale = 0.7f;
+    private const float MaxUiScale = 2.5f;
+    private const float DefaultExpandedWidth = 470f;
+    private const float DefaultCompactWidth = 270f;
+    private const float Unset = -99999f;
+    private const string SettingsResPath = "user://damage_tracker_ui.json";
 
     // ── Localization ───────────────────────────────────────────
 
     private static Dictionary<string, string>? _locStrings;
+    private static string _lang = "eng";
 
     private static Dictionary<string, string> LocStrings => _locStrings ??= LoadLocStrings();
 
     private static Dictionary<string, string> LoadLocStrings()
     {
-        string lang = ResolveGameLanguage();
-        
-        // Debug: list files in localization folder
-        string[] files = Godot.DirAccess.GetFilesAt($"res://assets/localization/{lang}");
-        GD.Print($"[DamageTracker] {lang} folder files: {string.Join(", ", files)}");
-        
+        string lang = _lang = ResolveGameLanguage();
+
         // Use res:// path - requires .pck file to be loaded
         string resPath = $"res://assets/localization/{lang}/damage_tracker.json";
-        GD.Print($"[DamageTracker] LoadLocStrings: trying res:// path = {resPath}");
-        
         if (!Godot.FileAccess.FileExists(resPath))
         {
-            GD.Print($"[DamageTracker] LoadLocStrings: res:// path not found, trying eng fallback");
             if (lang != "eng")
-                resPath = $"res://assets/localization/eng/damage_tracker.json";
+                resPath = "res://assets/localization/eng/damage_tracker.json";
             else
             {
                 GD.Print("[DamageTracker] LoadLocStrings: localization file not found!");
-                return new Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
+                return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             }
         }
-        
-        using Godot.FileAccess file = Godot.FileAccess.Open(resPath, Godot.FileAccess.ModeFlags.Read);
+
+        using Godot.FileAccess? file = Godot.FileAccess.Open(resPath, Godot.FileAccess.ModeFlags.Read);
         string json = file?.GetAsText() ?? "{}";
         GD.Print($"[DamageTracker] LoadLocStrings: loaded json from {resPath}");
         return JsonSerializer.Deserialize<Dictionary<string, string>>(json)
-               ?? new Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
+               ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     }
 
     private static string ResolveGameLanguage()
     {
         try
         {
-            System.Type? locMgr = System.Type.GetType(
+            Type? locMgr = Type.GetType(
                 "MegaCrit.Sts2.Core.Localization.LocManager, sts2", throwOnError: false);
             object? inst = locMgr?.GetProperty("Instance",
-                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)?.GetValue(null);
+                BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
             string? lang = inst?.GetType().GetProperty("Language")?.GetValue(inst) as string;
             if (!string.IsNullOrEmpty(lang))
-            {
-                GD.Print($"[DamageTracker] ResolveGameLanguage: LocManager.Language = {lang}");
                 return lang;
-            }
         }
-        catch (System.Exception ex) { GD.Print($"[DamageTracker] ResolveGameLanguage: LocManager error {ex.Message}"); }
+        catch (Exception ex)
+        {
+            GD.Print($"[DamageTracker] ResolveGameLanguage: LocManager error {ex.Message}");
+        }
 
         // Fallback: map OS locale to STS2 three-letter code
         string locale = OS.GetLocaleLanguage().ToLowerInvariant();
-        GD.Print($"[DamageTracker] ResolveGameLanguage: OS locale = {locale}");
         if (locale.StartsWith("zh")) return "zhs";
         if (locale.StartsWith("ja")) return "jpn";
         if (locale.StartsWith("ko")) return "kor";
@@ -89,7 +90,10 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
 
     private static string L(string key) => LocStrings.TryGetValue(key, out string? v) ? v : key;
 
-    // ── Palette (keep it minimal) ──────────────────────────────
+    private static string Hint(string zh, string en) => _lang == "zhs" ? zh : en;
+
+    // ── Palette ────────────────────────────────────────────────
+
     private static readonly Color White = new("FFFFFF");
     private static readonly Color Gray = new("A0A8B4");
     private static readonly Color DimGray = new("687480");
@@ -98,13 +102,11 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
     private static readonly Color Yellow = new("FACC15");
     private static readonly Color Cyan = new("22D3EE");
     private static readonly Color BgDark = new("000000B0");
-    private static readonly Color BgRow = new("FFFFFF10");
-    private static readonly Color BgActiveRow = new("4ADE8018");
     private static readonly Color Border = new("3A3A5C");
     private static readonly Color BorderActive = new("4ADE80");
 
     // Character theme colors based on their visual identity
-    private static readonly Dictionary<string, Color> CharTheme = new(System.StringComparer.OrdinalIgnoreCase)
+    private static readonly Dictionary<string, Color> CharTheme = new(StringComparer.OrdinalIgnoreCase)
     {
         ["ironclad"]    = new Color("E05050"),  // red
         ["silent"]      = new Color("5DB85D"),  // green
@@ -113,11 +115,27 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         ["regent"]      = new Color("D8A030"),  // gold/orange
     };
 
-    private static readonly Dictionary<string, Texture2D?> IconCache = new(System.StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, Texture2D?> IconCache = new(StringComparer.OrdinalIgnoreCase);
 
     private static DamageTrackerOverlay? _instance;
+    private static bool _pendingCreate;
 
-    private Control? _root;
+    // ── UI State & Layout Persistence ──────────────────────────
+
+    private sealed class UiSettings
+    {
+        public float Scale { get; set; } = 1f;
+        public float Width { get; set; }
+        public float CompactWidth { get; set; }
+        public float Height { get; set; }
+        public float X { get; set; } = Unset;
+        public float Y { get; set; } = Unset;
+        public bool Expanded { get; set; } = true;
+    }
+
+    private readonly UiSettings _ui = new();
+
+    private PanelContainer? _root;
     private MarginContainer? _contentPad;
     private ScrollContainer? _bodyScroll;
     private VBoxContainer? _bodyContent;
@@ -128,17 +146,142 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
     private Button? _toggleBtn;
     private Button? _hideBtn;
     private Button? _sideTab;
+    private GripNode? _grip;
+
     private bool _isDragging;
     private Vector2 _dragOffset;
-    private bool _expanded = true;
+    private bool _resizing;
+    private Vector2 _resizeStartMouse;
+    private Vector2 _resizeStartSize;
     private bool _hiddenToSide;
     private HiddenDockSide _hiddenSide = HiddenDockSide.Right;
-    private bool _layoutRefreshQueued;
     private bool _resetScrollPending;
     private string? _lastAppliedRunToken;
     private int _lastAppliedCombatIndex = -1;
     private OverlayState? _lastState;
-    private static bool _pendingCreate;
+    private int _playerCount;
+    private float _panelWidth;
+    private float _panelHeight;
+    private Vector2 _lastViewportSize;
+
+    // ── Scaled layout metrics ──────────────────────────────────
+
+    private float R(float v) => Mathf.Round(v * _ui.Scale);
+    private int FS(float v) => Mathf.Max(8, Mathf.RoundToInt(v * _ui.Scale));
+
+    private float PadX => R(10f);
+    private float PadY => R(8f);
+    private float Gap => R(4f);
+    private float HeaderH => R(24f);
+    private float HeadingH => R(15f);
+    private float RowH => R(_ui.Expanded ? 42f : 30f);
+    private float RowGap => R(2f);
+    private float RowPadX => R(6f);
+    private float AvatarSize => R(_ui.Expanded ? 32f : 24f);
+    private float AvatarGap => R(_ui.Expanded ? 8f : 6f);
+    private float NameMin => R(60f);
+    private float ColPct => R(38f);
+    private float ColTotal => R(62f);
+    private float ColCombat => R(62f);
+    private float ColLast => R(52f);
+    private float ColMax => R(52f);
+    private float GripSize => R(18f);
+
+    private float StatsWidth => _ui.Expanded
+        ? ColPct + ColTotal + ColCombat + ColLast + ColMax
+        : ColTotal;
+
+    private float MinPanelWidth =>
+        PadX * 2f + RowPadX * 2f + AvatarSize + AvatarGap + NameMin + StatsWidth;
+
+    private float PreferredWidth
+    {
+        get
+        {
+            if (_ui.Expanded)
+                return _ui.Width > 0f ? _ui.Width : Mathf.Max(DefaultExpandedWidth, MinPanelWidth);
+
+            return _ui.CompactWidth > 0f ? _ui.CompactWidth : Mathf.Max(DefaultCompactWidth, MinPanelWidth);
+        }
+    }
+
+    private float ChromeHeight =>
+        PadY * 2f + HeaderH + Gap + (_ui.Expanded ? HeadingH + Gap + 1f + Gap : 0f);
+
+    private float BodyContentHeight(int count) =>
+        count > 0 ? count * RowH + (count - 1) * RowGap : R(18f);
+
+    private static string SettingsPath() => ProjectSettings.GlobalizePath(SettingsResPath);
+
+    private static UiSettings LoadSettings()
+    {
+        UiSettings settings = new();
+        try
+        {
+            string path = SettingsPath();
+            if (!File.Exists(path))
+                return settings;
+
+            foreach (string rawLine in File.ReadAllLines(path))
+            {
+                string line = rawLine.Trim();
+                int eq = line.IndexOf('=');
+                if (eq <= 0)
+                    continue;
+
+                string key = line[..eq].Trim().ToLowerInvariant();
+                if (!float.TryParse(line[(eq + 1)..].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float val))
+                    continue;
+
+                switch (key)
+                {
+                    case "scale": settings.Scale = val; break;
+                    case "width": settings.Width = val; break;
+                    case "compact_width": settings.CompactWidth = val; break;
+                    case "height": settings.Height = val; break;
+                    case "x": settings.X = val; break;
+                    case "y": settings.Y = val; break;
+                    case "expanded": settings.Expanded = val != 0f; break;
+                }
+            }
+
+            if (settings.Scale <= 0f)
+                settings.Scale = 1f;
+            settings.Scale = Mathf.Clamp(settings.Scale, MinUiScale, MaxUiScale);
+        }
+        catch (Exception ex)
+        {
+            GD.Print($"[DamageTracker] settings load failed: {ex.Message}");
+        }
+        return settings;
+    }
+
+    private void SaveSettings()
+    {
+        try
+        {
+            string path = SettingsPath();
+            string? dir = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(dir))
+                Directory.CreateDirectory(dir);
+
+            CultureInfo inv = CultureInfo.InvariantCulture;
+            StringBuilder sb = new();
+            sb.AppendLine("# Damage Tracker overlay layout (edit while the game is closed)");
+            sb.AppendLine($"scale={_ui.Scale.ToString("0.###", inv)}");
+            sb.AppendLine($"width={_ui.Width.ToString("0.#", inv)}");
+            sb.AppendLine($"compact_width={_ui.CompactWidth.ToString("0.#", inv)}");
+            sb.AppendLine($"height={_ui.Height.ToString("0.#", inv)}");
+            sb.AppendLine($"x={_ui.X.ToString("0.#", inv)}");
+            sb.AppendLine($"y={_ui.Y.ToString("0.#", inv)}");
+            sb.AppendLine($"expanded={(_ui.Expanded ? "1" : "0")}");
+            File.WriteAllText(path, sb.ToString());
+        }
+        catch (Exception ex)
+        {
+            GD.Print($"[DamageTracker] settings save failed: {ex.Message}");
+        }
+    }
 
     /// <summary>
     /// Schedule overlay creation on next frame (safe to call from mod init before game loop is ready).
@@ -147,8 +290,6 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
     {
         _pendingCreate = true;
     }
-
-
 
     public override void _EnterTree()
     {
@@ -160,42 +301,54 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
     public override void _ExitTree()
     {
         RunDamageTrackerService.Changed -= OnChanged;
-        if (ReferenceEquals(_instance, this)) _instance = null;
+        if (ReferenceEquals(_instance, this))
+            _instance = null;
     }
 
     public override void _Ready()
+    {
+        UiSettings loaded = LoadSettings();
+        _ui.Scale = loaded.Scale;
+        _ui.Width = loaded.Width;
+        _ui.CompactWidth = loaded.CompactWidth;
+        _ui.Height = loaded.Height;
+        _ui.X = loaded.X;
+        _ui.Y = loaded.Y;
+        _ui.Expanded = loaded.Expanded;
+
+        BuildUi();
+        ApplyState(RunDamageTrackerService.BuildOverlayState());
+    }
+
+    private void BuildUi()
     {
         _root = new PanelContainer
         {
             Name = "Root",
             MouseFilter = Control.MouseFilterEnum.Stop,
-            Position = new Vector2(16, 16),
-            CustomMinimumSize = new Vector2(ExpandedWidth, 0),
-            Size = new Vector2(ExpandedWidth, 0)
+            Position = ResolveStartPosition(),
+            CustomMinimumSize = new Vector2(PreferredWidth, 0f)
         };
-
-        // Background panel (the root itself)
-        PanelContainer bg = (PanelContainer)_root;
-        bg.GuiInput += OnGuiInput;
-        bg.AddThemeStyleboxOverride("panel", new StyleBoxFlat
+        _root.GuiInput += OnGuiInput;
+        _root.AddThemeStyleboxOverride("panel", new StyleBoxFlat
         {
             BgColor = BgDark,
-            CornerRadiusTopLeft = 6, CornerRadiusTopRight = 6,
-            CornerRadiusBottomLeft = 6, CornerRadiusBottomRight = 6
+            CornerRadiusTopLeft = 6,
+            CornerRadiusTopRight = 6,
+            CornerRadiusBottomLeft = 6,
+            CornerRadiusBottomRight = 6
         });
 
-        // Outer margin
         _contentPad = new MarginContainer();
-        _contentPad.SetAnchorsPreset(Control.LayoutPreset.FullRect);
-        foreach (string side in new[] { "margin_left", "margin_right" })
-            _contentPad.AddThemeConstantOverride(side, 10);
-        foreach (string side in new[] { "margin_top", "margin_bottom" })
-            _contentPad.AddThemeConstantOverride(side, 8);
+        _contentPad.AddThemeConstantOverride("margin_left", Mathf.RoundToInt(PadX));
+        _contentPad.AddThemeConstantOverride("margin_right", Mathf.RoundToInt(PadX));
+        _contentPad.AddThemeConstantOverride("margin_top", Mathf.RoundToInt(PadY));
+        _contentPad.AddThemeConstantOverride("margin_bottom", Mathf.RoundToInt(PadY));
 
         VBoxContainer col = new() { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-        col.AddThemeConstantOverride("separation", 4);
+        col.AddThemeConstantOverride("separation", Mathf.RoundToInt(Gap));
 
-        // ── Header row: title + toggle ──
+        // ── Header row: title + toggle + hide ──
         col.AddChild(BuildHeader());
 
         // ── Column headings ──
@@ -211,19 +364,20 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         {
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
             SizeFlagsVertical = Control.SizeFlags.ShrinkBegin,
-            HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled
+            HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled,
+            VerticalScrollMode = ScrollContainer.ScrollMode.Auto
         };
 
         _bodyContent = new VBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-        _bodyContent.AddThemeConstantOverride("separation", 4);
+        _bodyContent.AddThemeConstantOverride("separation", 0);
 
         // ── Player rows ──
         _rows = new VBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-        _rows.AddThemeConstantOverride("separation", 2);
+        _rows.AddThemeConstantOverride("separation", Mathf.RoundToInt(RowGap));
         _bodyContent.AddChild(_rows);
 
         // ── Empty hint ──
-        _emptyLabel = MakeLabel(L("EMPTY"), 12, DimGray);
+        _emptyLabel = MakeLabel(L("EMPTY"), FS(12f), DimGray);
         _emptyLabel.HorizontalAlignment = HorizontalAlignment.Center;
         _bodyContent.AddChild(_emptyLabel);
 
@@ -231,14 +385,60 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         col.AddChild(_bodyScroll);
 
         _contentPad.AddChild(col);
-        bg.AddChild(_contentPad);
+        _root.AddChild(_contentPad);
         AddChild(_root);
 
         _sideTab = BuildSideTab();
         AddChild(_sideTab);
 
+        _grip = new GripNode
+        {
+            Name = "Grip",
+            MouseFilter = Control.MouseFilterEnum.Stop,
+            MouseDefaultCursorShape = Control.CursorShape.Fdiagsize,
+            TooltipText = Hint(
+                "拖动缩放（双击恢复默认）\nCtrl+滚轮 调字号 · 拖动面板移动",
+                "Drag to resize (double-click resets)\nCtrl+Wheel scales - drag panel to move")
+        };
+        _grip.GuiInput += OnGripInput;
+        AddChild(_grip);
+
         RefreshChrome();
-        ApplyState(RunDamageTrackerService.BuildOverlayState());
+    }
+
+    private Vector2 ResolveStartPosition()
+    {
+        Vector2 vp = GetViewport()?.GetVisibleRect().Size ?? new Vector2(1280f, 720f);
+        float x = _ui.X == Unset ? ViewportMargin : _ui.X;
+        float y = _ui.Y == Unset ? ViewportMargin : _ui.Y;
+        return new Vector2(
+            Mathf.Clamp(x, 0f, Mathf.Max(0f, vp.X - 200f)),
+            Mathf.Clamp(y, 0f, Mathf.Max(0f, vp.Y - 100f)));
+    }
+
+    private void RebuildUi()
+    {
+        if (_root != null && IsInstanceValid(_root))
+        {
+            _root.QueueFree();
+            _root = null;
+        }
+        if (_sideTab != null && IsInstanceValid(_sideTab))
+        {
+            _sideTab.QueueFree();
+            _sideTab = null;
+        }
+        if (_grip != null && IsInstanceValid(_grip))
+        {
+            _grip.QueueFree();
+            _grip = null;
+        }
+
+        BuildUi();
+        if (_lastState != null)
+            ApplyState(_lastState);
+        else
+            ApplyLayout();
     }
 
     // ── Header ─────────────────────────────────────────────────
@@ -246,44 +446,53 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
     private Control BuildHeader()
     {
         HBoxContainer h = new() { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-        h.AddThemeConstantOverride("separation", 6);
+        h.AddThemeConstantOverride("separation", Mathf.RoundToInt(R(6f)));
 
-        Label title = MakeLabel(L("TITLE"), 15, White);
+        Label title = MakeLabel(L("TITLE"), FS(15f), White);
         title.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+        title.ClipText = true;
+        title.TooltipText = Hint(
+            "拖动移动 · 右下角拖动缩放 · Ctrl+滚轮 调字号",
+            "Drag to move - drag bottom-right to resize - Ctrl+Wheel to scale");
 
-        _toggleBtn = new Button
-        {
-            Text = "\u25bc",
-            CustomMinimumSize = new Vector2(24, 24),
-            MouseFilter = Control.MouseFilterEnum.Stop,
-            FocusMode = Control.FocusModeEnum.None
-        };
-        _toggleBtn.AddThemeFontSizeOverride("font_size", 12);
-        _toggleBtn.AddThemeStyleboxOverride("normal", new StyleBoxFlat { BgColor = new Color("FFFFFF10"), CornerRadiusTopLeft = 3, CornerRadiusTopRight = 3, CornerRadiusBottomLeft = 3, CornerRadiusBottomRight = 3 });
-        _toggleBtn.AddThemeStyleboxOverride("hover", new StyleBoxFlat { BgColor = new Color("FFFFFF20"), CornerRadiusTopLeft = 3, CornerRadiusTopRight = 3, CornerRadiusBottomLeft = 3, CornerRadiusBottomRight = 3 });
-        _toggleBtn.AddThemeStyleboxOverride("pressed", new StyleBoxFlat { BgColor = new Color("FFFFFF30"), CornerRadiusTopLeft = 3, CornerRadiusTopRight = 3, CornerRadiusBottomLeft = 3, CornerRadiusBottomRight = 3 });
-        _toggleBtn.AddThemeColorOverride("font_color", Gray);
-        _toggleBtn.Pressed += OnToggle;
-
-        _hideBtn = new Button
-        {
-            Text = "\u00bb",
-            CustomMinimumSize = new Vector2(24, 24),
-            MouseFilter = Control.MouseFilterEnum.Stop,
-            FocusMode = Control.FocusModeEnum.None,
-            TooltipText = "Hide to side"
-        };
-        _hideBtn.AddThemeFontSizeOverride("font_size", 12);
-        _hideBtn.AddThemeStyleboxOverride("normal", new StyleBoxFlat { BgColor = new Color("FFFFFF10"), CornerRadiusTopLeft = 3, CornerRadiusTopRight = 3, CornerRadiusBottomLeft = 3, CornerRadiusBottomRight = 3 });
-        _hideBtn.AddThemeStyleboxOverride("hover", new StyleBoxFlat { BgColor = new Color("FFFFFF20"), CornerRadiusTopLeft = 3, CornerRadiusTopRight = 3, CornerRadiusBottomLeft = 3, CornerRadiusBottomRight = 3 });
-        _hideBtn.AddThemeStyleboxOverride("pressed", new StyleBoxFlat { BgColor = new Color("FFFFFF30"), CornerRadiusTopLeft = 3, CornerRadiusTopRight = 3, CornerRadiusBottomLeft = 3, CornerRadiusBottomRight = 3 });
-        _hideBtn.AddThemeColorOverride("font_color", Gray);
-        _hideBtn.Pressed += OnHideToSide;
+        _toggleBtn = MakeCaptionButton("\u25bc", OnToggle, Hint("展开/收起", "Expand / collapse"));
+        _hideBtn = MakeCaptionButton("\u00bb", OnHideToSide, Hint("收起到屏幕边缘", "Hide to screen edge"));
 
         h.AddChild(title);
         h.AddChild(_toggleBtn);
         h.AddChild(_hideBtn);
         return h;
+    }
+
+    private Button MakeCaptionButton(string text, Action onPressed, string tooltip)
+    {
+        Button btn = new()
+        {
+            Text = text,
+            CustomMinimumSize = new Vector2(R(24f), R(24f)),
+            MouseFilter = Control.MouseFilterEnum.Stop,
+            FocusMode = Control.FocusModeEnum.None,
+            TooltipText = tooltip
+        };
+        btn.AddThemeFontSizeOverride("font_size", FS(12f));
+        btn.AddThemeStyleboxOverride("normal", RoundedBox("FFFFFF10"));
+        btn.AddThemeStyleboxOverride("hover", RoundedBox("FFFFFF20"));
+        btn.AddThemeStyleboxOverride("pressed", RoundedBox("FFFFFF30"));
+        btn.AddThemeColorOverride("font_color", Gray);
+        btn.Pressed += onPressed;
+        return btn;
+    }
+
+    private static StyleBoxFlat RoundedBox(string bg, int radius = 3)
+    {
+        return new StyleBoxFlat
+        {
+            BgColor = new Color(bg),
+            CornerRadiusTopLeft = radius,
+            CornerRadiusTopRight = radius,
+            CornerRadiusBottomLeft = radius,
+            CornerRadiusBottomRight = radius
+        };
     }
 
     private Button BuildSideTab()
@@ -300,55 +509,55 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         };
         tab.AddThemeFontSizeOverride("font_size", 12);
         tab.AddThemeColorOverride("font_color", White);
-        tab.AddThemeStyleboxOverride("normal", new StyleBoxFlat
-        {
-            BgColor = new Color("121821EE"),
-            BorderColor = BorderActive,
-            BorderWidthLeft = 2,
-            BorderWidthTop = 1,
-            BorderWidthRight = 2,
-            BorderWidthBottom = 1,
-            CornerRadiusTopLeft = 6,
-            CornerRadiusTopRight = 6,
-            CornerRadiusBottomLeft = 6,
-            CornerRadiusBottomRight = 6
-        });
-        tab.AddThemeStyleboxOverride("hover", new StyleBoxFlat
-        {
-            BgColor = new Color("1A2431EE"),
-            BorderColor = BorderActive,
-            BorderWidthLeft = 2,
-            BorderWidthTop = 1,
-            BorderWidthRight = 2,
-            BorderWidthBottom = 1,
-            CornerRadiusTopLeft = 6,
-            CornerRadiusTopRight = 6,
-            CornerRadiusBottomLeft = 6,
-            CornerRadiusBottomRight = 6
-        });
+        tab.AddThemeStyleboxOverride("normal", TabBox("121821EE"));
+        tab.AddThemeStyleboxOverride("hover", TabBox("1A2431EE"));
         tab.Pressed += OnRestoreFromSide;
         return tab;
     }
 
+    private static StyleBoxFlat TabBox(string bg)
+    {
+        return new StyleBoxFlat
+        {
+            BgColor = new Color(bg),
+            BorderColor = BorderActive,
+            BorderWidthLeft = 2,
+            BorderWidthTop = 1,
+            BorderWidthRight = 2,
+            BorderWidthBottom = 1,
+            CornerRadiusTopLeft = 6,
+            CornerRadiusTopRight = 6,
+            CornerRadiusBottomLeft = 6,
+            CornerRadiusBottomRight = 6
+        };
+    }
+
     // ── Column headings ────────────────────────────────────────
 
-    private static Control BuildColumnHeadings()
+    private Control BuildColumnHeadings()
     {
         HBoxContainer h = new() { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
         h.AddThemeConstantOverride("separation", 0);
 
-        // Icon spacer (40px to match avatar)
-        h.AddChild(Spacer(40));
+        h.AddChild(Spacer(AvatarSize));
+        h.AddChild(Spacer(AvatarGap));
         h.AddChild(HeadLabel(L("PLAYER"), true));
-        h.AddChild(HeadLabel(L("PCT"), false, 38));
-        h.AddChild(HeadLabel(L("TOTAL"), false, 62));
-        h.AddChild(HeadLabel(L("COMBAT"), false, 62));
-        h.AddChild(HeadLabel(L("LAST"), false, 52));
-        h.AddChild(HeadLabel(L("MAX"), false, 52));
+        if (_ui.Expanded)
+        {
+            h.AddChild(HeadLabel(L("PCT"), false, ColPct));
+            h.AddChild(HeadLabel(L("TOTAL"), false, ColTotal));
+            h.AddChild(HeadLabel(L("COMBAT"), false, ColCombat));
+            h.AddChild(HeadLabel(L("LAST"), false, ColLast));
+            h.AddChild(HeadLabel(L("MAX"), false, ColMax));
+        }
+        else
+        {
+            h.AddChild(HeadLabel(L("TOTAL"), false, ColTotal));
+        }
         return h;
     }
 
-    // ── Player row ─────────────────────────────────────────────
+    // ── Player rows ────────────────────────────────────────────
 
     private Control CreateRow(PlayerDamageSnapshot snap, float ratio)
     {
@@ -358,63 +567,57 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         PanelContainer card = new()
         {
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-            CustomMinimumSize = new Vector2(0, 40)
+            CustomMinimumSize = new Vector2(0f, RowH),
+            MouseFilter = Control.MouseFilterEnum.Pass,
+            TooltipText = RowTooltip(snap, ratio)
         };
-        card.AddThemeStyleboxOverride("panel", new StyleBoxFlat
-        {
-            BgColor = new Color(theme, active ? 0.18f : 0.08f),
-            BorderColor = active ? new Color(theme, 0.9f) : new Color(theme, 0.3f),
-            BorderWidthLeft = 3,
-            BorderWidthTop = 0, BorderWidthRight = 0, BorderWidthBottom = 0,
-            CornerRadiusTopLeft = 4, CornerRadiusTopRight = 4,
-            CornerRadiusBottomLeft = 4, CornerRadiusBottomRight = 4
-        });
+        card.AddThemeStyleboxOverride("panel", CardBox(theme, active));
 
         MarginContainer mp = new();
-        mp.SetAnchorsPreset(Control.LayoutPreset.FullRect);
-        mp.AddThemeConstantOverride("margin_left", 6);
-        mp.AddThemeConstantOverride("margin_right", 6);
-        mp.AddThemeConstantOverride("margin_top", 4);
-        mp.AddThemeConstantOverride("margin_bottom", 4);
+        mp.AddThemeConstantOverride("margin_left", Mathf.RoundToInt(RowPadX));
+        mp.AddThemeConstantOverride("margin_right", Mathf.RoundToInt(RowPadX));
+        mp.AddThemeConstantOverride("margin_top", Mathf.RoundToInt(Mathf.Max(2f, RowH * 0.1f)));
+        mp.AddThemeConstantOverride("margin_bottom", Mathf.RoundToInt(Mathf.Max(2f, RowH * 0.1f)));
 
         HBoxContainer row = new() { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
         row.AddThemeConstantOverride("separation", 0);
 
-        // Avatar 32x32
-        row.AddChild(BuildAvatar(snap, 32));
-        row.AddChild(Spacer(8));
+        row.AddChild(BuildAvatar(snap, Mathf.RoundToInt(AvatarSize)));
+        row.AddChild(Spacer(AvatarGap));
 
-        // Name + character stacked
-        VBoxContainer nameCol = new() { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        VBoxContainer nameCol = new()
+        {
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            CustomMinimumSize = new Vector2(NameMin, 0f)
+        };
         nameCol.AddThemeConstantOverride("separation", 0);
 
-        Label nameLabel = MakeLabel(snap.DisplayName, 13, active ? theme.Lightened(0.3f) : White);
+        Label nameLabel = MakeLabel(snap.DisplayName, FS(13f), active ? theme.Lightened(0.3f) : White);
         nameLabel.ClipText = true;
+        nameLabel.TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis;
         nameLabel.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
 
-        Label charLabel = MakeLabel(snap.CharacterName, 10, new Color(theme, 0.7f));
+        Label charLabel = MakeLabel(snap.CharacterName, FS(10f), new Color(theme, 0.7f));
         charLabel.ClipText = true;
+        charLabel.TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis;
 
         nameCol.AddChild(nameLabel);
         nameCol.AddChild(charLabel);
         row.AddChild(nameCol);
 
-        // Percentage label
-        int pct = (int)(ratio * 100f);
-        row.AddChild(StatCell($"{pct}%", new Color(theme, 0.9f), 38));
-
-        // Stat columns — right-aligned, fixed width
-        row.AddChild(StatCell(RunDamageTrackerService.Format(snap.TotalDamage), Yellow, 62));
-        row.AddChild(StatCell(RunDamageTrackerService.Format(snap.CombatDamage), Cyan, 62));
-        row.AddChild(StatCell(RunDamageTrackerService.Format(snap.LastDamage), Red, 52));
-        row.AddChild(StatCell(RunDamageTrackerService.Format(snap.MaxHitDamage), new Color("FF79C6"), 52));
+        int pct = (int)(Mathf.Clamp(ratio, 0f, 1f) * 100f);
+        row.AddChild(StatCell($"{pct}%", new Color(theme, 0.9f), ColPct, FS(13f)));
+        row.AddChild(StatCell(FormatCell(snap.TotalDamage), Yellow, ColTotal, FS(13f)));
+        row.AddChild(StatCell(FormatCell(snap.CombatDamage), Cyan, ColCombat, FS(13f)));
+        row.AddChild(StatCell(FormatCell(snap.LastDamage), Red, ColLast, FS(13f)));
+        row.AddChild(StatCell(FormatCell(snap.MaxHitDamage), new Color("FF79C6"), ColMax, FS(13f)));
 
         mp.AddChild(row);
 
         // ── Damage share bar ──
         Control barBg = new()
         {
-            CustomMinimumSize = new Vector2(0, 3),
+            CustomMinimumSize = new Vector2(0f, Mathf.Max(2f, R(3f))),
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
             MouseFilter = Control.MouseFilterEnum.Ignore
         };
@@ -430,10 +633,14 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         {
             Color = new Color(theme, 0.6f),
             MouseFilter = Control.MouseFilterEnum.Ignore,
-            AnchorLeft = 0, AnchorTop = 0,
+            AnchorLeft = 0f,
+            AnchorTop = 0f,
             AnchorRight = Mathf.Clamp(ratio, 0f, 1f),
-            AnchorBottom = 1,
-            OffsetLeft = 0, OffsetTop = 0, OffsetRight = 0, OffsetBottom = 0
+            AnchorBottom = 1f,
+            OffsetLeft = 0f,
+            OffsetTop = 0f,
+            OffsetRight = 0f,
+            OffsetBottom = 0f
         };
 
         barBg.AddChild(barTrack);
@@ -445,71 +652,193 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         cardContent.AddChild(barBg);
 
         card.AddChild(cardContent);
+        FlashOnUpdate(card);
+        return card;
+    }
 
-        // Flash animation on update
-        card.Modulate = new Color(1, 1, 1, 0.3f);
+    private Control CreateCompactRow(PlayerDamageSnapshot snap, float ratio)
+    {
+        Color theme = GetCharTheme(snap.CharacterName);
+        bool active = snap.IsActive;
+
+        PanelContainer card = new()
+        {
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            CustomMinimumSize = new Vector2(0f, RowH),
+            MouseFilter = Control.MouseFilterEnum.Pass,
+            TooltipText = RowTooltip(snap, ratio)
+        };
+        card.AddThemeStyleboxOverride("panel", CardBox(theme, active));
+
+        MarginContainer mp = new();
+        mp.AddThemeConstantOverride("margin_left", Mathf.RoundToInt(RowPadX));
+        mp.AddThemeConstantOverride("margin_right", Mathf.RoundToInt(RowPadX));
+        mp.AddThemeConstantOverride("margin_top", Mathf.RoundToInt(R(2f)));
+        mp.AddThemeConstantOverride("margin_bottom", Mathf.RoundToInt(R(2f)));
+
+        HBoxContainer row = new() { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        row.AddThemeConstantOverride("separation", 0);
+
+        row.AddChild(BuildAvatar(snap, Mathf.RoundToInt(R(24f))));
+        row.AddChild(Spacer(AvatarGap));
+
+        Label nameLabel = MakeLabel(snap.DisplayName, FS(12f), active ? theme.Lightened(0.3f) : White);
+        nameLabel.ClipText = true;
+        nameLabel.TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis;
+        nameLabel.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+        nameLabel.CustomMinimumSize = new Vector2(NameMin, 0f);
+        row.AddChild(nameLabel);
+
+        row.AddChild(StatCell(FormatCell(snap.TotalDamage), Yellow, ColTotal, FS(13f)));
+
+        mp.AddChild(row);
+        card.AddChild(mp);
+        FlashOnUpdate(card);
+        return card;
+    }
+
+    private static StyleBoxFlat CardBox(Color theme, bool active)
+    {
+        return new StyleBoxFlat
+        {
+            BgColor = new Color(theme, active ? 0.18f : 0.08f),
+            BorderColor = active ? new Color(theme, 0.9f) : new Color(theme, 0.3f),
+            BorderWidthLeft = 3,
+            BorderWidthTop = 0,
+            BorderWidthRight = 0,
+            BorderWidthBottom = 0,
+            CornerRadiusTopLeft = 4,
+            CornerRadiusTopRight = 4,
+            CornerRadiusBottomLeft = 4,
+            CornerRadiusBottomRight = 4
+        };
+    }
+
+    private static void FlashOnUpdate(Control card)
+    {
+        card.Modulate = new Color(1f, 1f, 1f, 0.3f);
         card.TreeEntered += () =>
         {
-            Tween? tw = card.CreateTween();
-            tw?.TweenProperty(card, "modulate", new Color(1, 1, 1, 1), 0.35f)
-               .SetTrans(Tween.TransitionType.Cubic)
-               .SetEase(Tween.EaseType.Out);
+            if (IsInstanceValid(card))
+            {
+                card.CreateTween()?
+                    .TweenProperty(card, "modulate", new Color(1f, 1f, 1f, 1f), 0.35f)
+                    .SetTrans(Tween.TransitionType.Cubic)
+                    .SetEase(Tween.EaseType.Out);
+            }
         };
+    }
 
-        return card;
+    private static string RowTooltip(PlayerDamageSnapshot snap, float ratio)
+    {
+        string pct = $"{Mathf.RoundToInt(Mathf.Clamp(ratio, 0f, 1f) * 100f)}%";
+        return $"{snap.DisplayName} \u00b7 {snap.CharacterName} \u00b7 {pct}\n"
+             + $"{L("TOTAL")}: {RunDamageTrackerService.Format(snap.TotalDamage)}    {L("COMBAT")}: {RunDamageTrackerService.Format(snap.CombatDamage)}\n"
+             + $"{L("LAST")}: {RunDamageTrackerService.Format(snap.LastDamage)}    {L("MAX")}: {RunDamageTrackerService.Format(snap.MaxHitDamage)}";
     }
 
     // ── Avatar ─────────────────────────────────────────────────
 
+    private static bool IsResourceAlive(Texture2D? tex)
+    {
+        if (tex == null)
+            return false;
+
+        try
+        {
+            return IsInstanceValid(tex) && tex.GetWidth() > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static Control BuildAvatar(PlayerDamageSnapshot snap, int size)
     {
-        Texture2D? tex = LoadIcon(snap.CharacterName) ?? snap.PortraitTexture;
+        Texture2D? tex = null;
+        try
+        {
+            tex = LoadIcon(snap.CharacterName);
+            if (!IsResourceAlive(tex))
+                tex = IsResourceAlive(snap.PortraitTexture) ? snap.PortraitTexture : null;
+        }
+        catch
+        {
+            tex = null;
+        }
 
         if (tex != null)
         {
-            TextureRect img = new()
+            try
             {
-                Texture = tex,
-                ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
-                StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
-                CustomMinimumSize = new Vector2(size, size),
-                SizeFlagsVertical = Control.SizeFlags.ShrinkCenter
-            };
-            return img;
+                return new TextureRect
+                {
+                    Texture = tex,
+                    ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+                    StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
+                    CustomMinimumSize = new Vector2(size, size),
+                    SizeFlagsVertical = Control.SizeFlags.ShrinkCenter,
+                    MouseFilter = Control.MouseFilterEnum.Ignore
+                };
+            }
+            catch (Exception ex)
+            {
+                GD.Print($"[DamageTracker] avatar texture unavailable ({ex.GetType().Name}); using initials");
+            }
         }
 
-        // Colored square fallback with initials
+        return InitialsAvatar(snap, size);
+    }
+
+    private static Control InitialsAvatar(PlayerDamageSnapshot snap, int size)
+    {
         PanelContainer frame = new()
         {
             CustomMinimumSize = new Vector2(size, size),
-            SizeFlagsVertical = Control.SizeFlags.ShrinkCenter
+            SizeFlagsVertical = Control.SizeFlags.ShrinkCenter,
+            MouseFilter = Control.MouseFilterEnum.Ignore
         };
+
+        Color bgColor;
+        try
+        {
+            bgColor = Color.FromHsv((snap.PlayerKey % 360) / 360f, 0.45f, 0.55f);
+        }
+        catch
+        {
+            bgColor = Gray;
+        }
+
         frame.AddThemeStyleboxOverride("panel", new StyleBoxFlat
         {
-            BgColor = Color.FromHsv((snap.PlayerKey % 360) / 360f, 0.4f, 0.5f),
-            CornerRadiusTopLeft = 4, CornerRadiusTopRight = 4,
-            CornerRadiusBottomLeft = 4, CornerRadiusBottomRight = 4
+            BgColor = bgColor,
+            CornerRadiusTopLeft = 4,
+            CornerRadiusTopRight = 4,
+            CornerRadiusBottomLeft = 4,
+            CornerRadiusBottomRight = 4
         });
 
         CenterContainer cc = new();
         cc.SetAnchorsPreset(Control.LayoutPreset.FullRect);
-        Label ini = MakeLabel(Initials(snap), 12, White);
+        Label ini = MakeLabel(Initials(snap), Mathf.Max(8, Mathf.RoundToInt(size * 0.38f)), White);
         cc.AddChild(ini);
         frame.AddChild(cc);
         return frame;
     }
 
-    // ── Toggle expand / collapse ───────────────────────────────
+    // ── Toggle expand / collapse / side hide ───────────────────
 
     private void OnToggle()
     {
-        _expanded = !_expanded;
+        _ui.Expanded = !_ui.Expanded;
+        SaveSettings();
         RefreshChrome();
 
         if (_lastState != null)
             ApplyState(_lastState);
         else
-            QueueLayoutRefresh();
+            ApplyLayout();
     }
 
     private void OnHideToSide()
@@ -520,7 +849,6 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         _hiddenSide = ResolveHiddenSide();
         _hiddenToSide = true;
         RefreshChrome();
-        UpdateSideTabPosition();
     }
 
     private void OnRestoreFromSide()
@@ -531,126 +859,116 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         if (_lastState != null)
             ApplyState(_lastState);
         else
-            QueueLayoutRefresh();
-    }
-
-    // ── Compact row (icon + name + total only) ────────────────
-
-    private Control CreateCompactRow(PlayerDamageSnapshot snap, float ratio)
-    {
-        Color theme = GetCharTheme(snap.CharacterName);
-        bool active = snap.IsActive;
-
-        PanelContainer card = new()
-        {
-            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-            CustomMinimumSize = new Vector2(0, 28)
-        };
-        card.AddThemeStyleboxOverride("panel", new StyleBoxFlat
-        {
-            BgColor = new Color(theme, active ? 0.18f : 0.08f),
-            BorderColor = active ? new Color(theme, 0.9f) : new Color(theme, 0.3f),
-            BorderWidthLeft = 3,
-            BorderWidthTop = 0, BorderWidthRight = 0, BorderWidthBottom = 0,
-            CornerRadiusTopLeft = 4, CornerRadiusTopRight = 4,
-            CornerRadiusBottomLeft = 4, CornerRadiusBottomRight = 4
-        });
-
-        MarginContainer mp = new();
-        mp.SetAnchorsPreset(Control.LayoutPreset.FullRect);
-        mp.AddThemeConstantOverride("margin_left", 6);
-        mp.AddThemeConstantOverride("margin_right", 6);
-        mp.AddThemeConstantOverride("margin_top", 2);
-        mp.AddThemeConstantOverride("margin_bottom", 2);
-
-        HBoxContainer row = new() { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-        row.AddThemeConstantOverride("separation", 0);
-
-        // Avatar 24x24
-        row.AddChild(BuildAvatar(snap, 24));
-        row.AddChild(Spacer(6));
-
-        // Name only (no character subtitle)
-        Label nameLabel = MakeLabel(snap.DisplayName, 12, active ? theme.Lightened(0.3f) : White);
-        nameLabel.ClipText = true;
-        nameLabel.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
-        row.AddChild(nameLabel);
-
-        // Total damage
-        row.AddChild(StatCell(RunDamageTrackerService.Format(snap.TotalDamage), Yellow, 62));
-
-        mp.AddChild(row);
-        card.AddChild(mp);
-
-        card.Modulate = new Color(1, 1, 1, 0.3f);
-        card.TreeEntered += () =>
-        {
-            Tween? tw = card.CreateTween();
-            tw?.TweenProperty(card, "modulate", new Color(1, 1, 1, 1), 0.35f)
-               .SetTrans(Tween.TransitionType.Cubic)
-               .SetEase(Tween.EaseType.Out);
-        };
-
-        return card;
+            ApplyLayout();
     }
 
     // ── State update ───────────────────────────────────────────
 
     private void OnChanged(OverlayState s)
     {
-        if (!IsInsideTree()) return;
+        if (!IsInsideTree())
+            return;
         Callable.From(() => ApplyState(s)).CallDeferred();
     }
 
     private void ApplyState(OverlayState s)
     {
-        if (_rows == null || _emptyLabel == null) return;
+        if (_rows == null || _emptyLabel == null)
+            return;
 
-        bool resetScroll = !string.Equals(_lastAppliedRunToken, s.RunToken, System.StringComparison.Ordinal)
-            || _lastAppliedCombatIndex != s.CombatIndex;
-        _lastAppliedRunToken = s.RunToken;
-        _lastAppliedCombatIndex = s.CombatIndex;
-        _resetScrollPending |= resetScroll;
-
-        _lastState = s;
-
-        // Hide column headings and separator in compact mode
-        if (_columnHeadings != null) _columnHeadings.Visible = _expanded;
-        if (_separator != null) _separator.Visible = _expanded;
-
-        foreach (Node c in _rows.GetChildren())
+        try
         {
-            _rows.RemoveChild(c);
-            c.QueueFree();
+            bool resetScroll = !string.Equals(_lastAppliedRunToken, s.RunToken, StringComparison.Ordinal)
+                || _lastAppliedCombatIndex != s.CombatIndex;
+            _lastAppliedRunToken = s.RunToken;
+            _lastAppliedCombatIndex = s.CombatIndex;
+            _resetScrollPending |= resetScroll;
+
+            _lastState = s;
+            _playerCount = s.Players.Count;
+
+            if (_columnHeadings != null) _columnHeadings.Visible = _ui.Expanded;
+            if (_separator != null) _separator.Visible = _ui.Expanded;
+
+            foreach (Node c in _rows.GetChildren())
+            {
+                _rows.RemoveChild(c);
+                c.QueueFree();
+            }
+
+            _emptyLabel.Visible = s.Players.Count == 0;
+
+            decimal teamTotal = 0m;
+            for (int i = 0; i < s.Players.Count; i++)
+                teamTotal += s.Players[i].TotalDamage;
+
+            for (int i = 0; i < s.Players.Count; i++)
+            {
+                PlayerDamageSnapshot snap = s.Players[i];
+                float ratio = teamTotal > 0m ? (float)(snap.TotalDamage / teamTotal) : 0f;
+                try
+                {
+                    _rows.AddChild(_ui.Expanded ? CreateRow(snap, ratio) : CreateCompactRow(snap, ratio));
+                }
+                catch (Exception ex)
+                {
+                    GD.Print($"[DamageTracker] row failed for {snap.DisplayName}: {ex.GetType().Name} {ex.Message}");
+                    _rows.AddChild(FallbackRow(snap));
+                }
+            }
+
+            RefreshChrome();
+            ApplyLayout();
         }
-
-        _emptyLabel.Visible = s.Players.Count == 0;
-
-        decimal teamTotal = 0;
-        for (int i = 0; i < s.Players.Count; i++)
-            teamTotal += s.Players[i].TotalDamage;
-
-        for (int i = 0; i < s.Players.Count; i++)
+        catch (Exception ex)
         {
-            float ratio = teamTotal > 0 ? (float)(s.Players[i].TotalDamage / teamTotal) : 0f;
-            _rows.AddChild(_expanded ? CreateRow(s.Players[i], ratio) : CreateCompactRow(s.Players[i], ratio));
+            GD.Print($"[DamageTracker] ApplyState failed: {ex.GetType().Name} {ex.Message}");
         }
-
-        RefreshChrome();
-        QueueLayoutRefresh();
     }
 
-    // ── Drag ───────────────────────────────────────────────────
+    private Control FallbackRow(PlayerDamageSnapshot snap)
+    {
+        Label label = MakeLabel($"{snap.DisplayName}   {FormatCell(snap.TotalDamage)}", FS(13f), White);
+        label.ClipText = true;
+        label.TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis;
+        label.CustomMinimumSize = new Vector2(0f, RowH);
+        return label;
+    }
+
+    // ── Drag, resize & scale input ─────────────────────────────
+
+    public override void _Input(InputEvent @event)
+    {
+        if (_root == null || _hiddenToSide)
+            return;
+
+        if (@event is InputEventMouseButton mb
+            && mb.Pressed
+            && mb.CtrlPressed
+            && mb.ButtonIndex is MouseButton.WheelUp or MouseButton.WheelDown
+            && new Rect2(_root.GlobalPosition, _root.Size).HasPoint(GetViewport().GetMousePosition()))
+        {
+            ChangeScale(mb.ButtonIndex == MouseButton.WheelUp ? 0.1f : -0.1f);
+            GetViewport().SetInputAsHandled();
+        }
+    }
 
     public override void _UnhandledInput(InputEvent @event)
     {
-        if (_isDragging && @event is InputEventMouseButton mb && !mb.Pressed && mb.ButtonIndex == MouseButton.Left)
+        if (@event is InputEventMouseButton mb && !mb.Pressed && mb.ButtonIndex == MouseButton.Left)
+        {
+            if (_isDragging || _resizing)
+                SaveSettings();
             _isDragging = false;
+            _resizing = false;
+        }
     }
 
     private void OnGuiInput(InputEvent @event)
     {
-        if (_root == null) return;
+        if (_root == null)
+            return;
+
         switch (@event)
         {
             case InputEventMouseButton mb when mb.ButtonIndex == MouseButton.Left:
@@ -660,8 +978,15 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
                     _dragOffset = GetViewport().GetMousePosition() - _root.Position;
                     GetViewport().SetInputAsHandled();
                 }
-                else _isDragging = false;
+                else if (_isDragging)
+                {
+                    _isDragging = false;
+                    _ui.X = _root.Position.X;
+                    _ui.Y = _root.Position.Y;
+                    SaveSettings();
+                }
                 break;
+
             case InputEventMouseMotion when _isDragging:
                 ClampPos(GetViewport().GetMousePosition() - _dragOffset);
                 GetViewport().SetInputAsHandled();
@@ -669,15 +994,161 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         }
     }
 
+    private void OnGripInput(InputEvent @event)
+    {
+        if (_root == null)
+            return;
+
+        switch (@event)
+        {
+            case InputEventMouseButton mb when mb.ButtonIndex == MouseButton.Left:
+                if (mb.Pressed)
+                {
+                    if (mb.DoubleClick)
+                    {
+                        ResetLayoutDefaults();
+                        return;
+                    }
+                    _resizing = true;
+                    _resizeStartMouse = GetViewport().GetMousePosition();
+                    _resizeStartSize = _root.Size;
+                    GetViewport().SetInputAsHandled();
+                }
+                else if (_resizing)
+                {
+                    _resizing = false;
+                    SaveSettings();
+                }
+                break;
+
+            case InputEventMouseMotion when _resizing:
+                ResizeFromMouse(GetViewport().GetMousePosition());
+                GetViewport().SetInputAsHandled();
+                break;
+        }
+    }
+
+    private void ResizeFromMouse(Vector2 mouse)
+    {
+        if (_root == null)
+            return;
+
+        Vector2 delta = mouse - _resizeStartMouse;
+        Vector2 vp = GetViewport().GetVisibleRect().Size;
+        float maxW = Mathf.Max(MinPanelWidth, vp.X - ViewportMargin * 2f);
+        float maxH = Mathf.Max(MinPanelHeight, vp.Y - ViewportMargin * 2f);
+        float width = Mathf.Clamp(_resizeStartSize.X + delta.X, MinPanelWidth, maxW);
+        float height = Mathf.Clamp(_resizeStartSize.Y + delta.Y, MinPanelHeight, maxH);
+
+        if (_ui.Expanded)
+            _ui.Width = width;
+        else
+            _ui.CompactWidth = width;
+        _ui.Height = height;
+
+        ApplyLayout();
+    }
+
+    private void ChangeScale(float delta)
+    {
+        float next = Mathf.Clamp(Mathf.Round((_ui.Scale + delta) * 100f) / 100f, MinUiScale, MaxUiScale);
+        if (Mathf.IsEqualApprox(next, _ui.Scale))
+            return;
+
+        _ui.Scale = next;
+        SaveSettings();
+        Callable.From(RebuildUi).CallDeferred();
+    }
+
+    private void ResetLayoutDefaults()
+    {
+        _ui.Scale = 1f;
+        _ui.Width = 0f;
+        _ui.CompactWidth = 0f;
+        _ui.Height = 0f;
+        SaveSettings();
+        Callable.From(RebuildUi).CallDeferred();
+    }
+
+    // ── Layout & Chrome ────────────────────────────────────────
+
+    private void ApplyLayout()
+    {
+        if (_root == null || _bodyScroll == null)
+            return;
+
+        Vector2 vp = GetViewport().GetVisibleRect().Size;
+        float maxPanelH = Mathf.Max(MinPanelHeight, vp.Y - ViewportMargin * 2f);
+        float minPanelW = MinPanelWidth;
+        float maxPanelW = Mathf.Max(minPanelW, vp.X - ViewportMargin * 2f);
+        float width = Mathf.Clamp(PreferredWidth, minPanelW, maxPanelW);
+
+        float chromeH = ChromeHeight;
+        float bodyContentH = BodyContentHeight(_playerCount);
+        float naturalH = chromeH + bodyContentH;
+
+        float panelH;
+        if (_ui.Height > 0f)
+        {
+            float minUserH = chromeH + Mathf.Min(RowH, Mathf.Max(1f, bodyContentH));
+            panelH = Mathf.Clamp(_ui.Height, minUserH, maxPanelH);
+        }
+        else
+        {
+            panelH = Mathf.Min(naturalH, maxPanelH);
+        }
+
+        float bodyH = Mathf.Max(RowH * 0.8f, panelH - chromeH);
+        panelH = chromeH + bodyH;
+
+        _bodyScroll.CustomMinimumSize = new Vector2(0f, bodyH);
+        _root.CustomMinimumSize = new Vector2(width, panelH);
+        _root.Size = new Vector2(width, panelH);
+        _panelWidth = width;
+        _panelHeight = panelH;
+
+        if (_grip != null)
+        {
+            float gripSize = GripSize;
+            _grip.Size = new Vector2(gripSize, gripSize);
+            _grip.Position = _root.Position + new Vector2(width - gripSize - R(2f), panelH - gripSize - R(2f));
+            _grip.Visible = !_hiddenToSide;
+            _grip.QueueRedraw();
+        }
+
+        if (_resetScrollPending)
+        {
+            _bodyScroll.ScrollVertical = 0;
+            _resetScrollPending = false;
+        }
+
+        ClampPos(_root.Position);
+    }
+
     private void ClampPos(Vector2 p)
     {
-        if (_root == null) return;
+        if (_root == null)
+            return;
+
         Vector2 vp = GetViewport().GetVisibleRect().Size;
         Vector2 sz = GetCurrentRootSize();
         _root.Position = new Vector2(
-            Mathf.Clamp(p.X, 0, Mathf.Max(0, vp.X - sz.X)),
-            Mathf.Clamp(p.Y, 0, Mathf.Max(0, vp.Y - sz.Y)));
+            Mathf.Clamp(p.X, 0f, Mathf.Max(0f, vp.X - sz.X)),
+            Mathf.Clamp(p.Y, 0f, Mathf.Max(0f, vp.Y - sz.Y)));
+
+        if (_grip != null)
+            _grip.Position = _root.Position + new Vector2(sz.X - GripSize - R(2f), sz.Y - GripSize - R(2f));
+
         UpdateSideTabPosition();
+    }
+
+    private Vector2 GetCurrentRootSize()
+    {
+        float w = _panelWidth > 0f ? _panelWidth : PreferredWidth;
+        float h = _panelHeight > 0f
+            ? _panelHeight
+            : (_root != null && _root.Size.Y > 0f ? _root.Size.Y : MinPanelHeight);
+        return new Vector2(w, h);
     }
 
     private void RefreshChrome()
@@ -686,27 +1157,26 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
             return;
 
         if (_toggleBtn != null)
-            _toggleBtn.Text = _expanded ? "\u25bc" : "\u25b6";
+            _toggleBtn.Text = _ui.Expanded ? "\u25bc" : "\u25b6";
 
         if (_hideBtn != null)
             _hideBtn.Text = _hiddenSide == HiddenDockSide.Left ? "\u00ab" : "\u00bb";
 
         _root.Visible = !_hiddenToSide;
+        if (_contentPad != null)
+            _contentPad.Visible = !_hiddenToSide;
+        if (_grip != null)
+            _grip.Visible = !_hiddenToSide;
+
         if (_sideTab != null)
         {
             _sideTab.Visible = _hiddenToSide;
             _sideTab.Text = _hiddenSide == HiddenDockSide.Left ? $"\u00bb {L("TITLE")}" : $"{L("TITLE")} \u00ab";
         }
 
-        float width = _expanded ? ExpandedWidth : CompactWidth;
-        _root.CustomMinimumSize = new Vector2(width, _root.CustomMinimumSize.Y);
-
-        if (_contentPad != null)
-            _contentPad.Visible = !_hiddenToSide;
-
         UpdateSideTabPosition();
         if (!_hiddenToSide)
-            QueueLayoutRefresh();
+            ApplyLayout();
     }
 
     private HiddenDockSide ResolveHiddenSide()
@@ -714,9 +1184,9 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         if (_root == null)
             return HiddenDockSide.Right;
 
-        Vector2 viewportSize = GetViewport().GetVisibleRect().Size;
+        Vector2 vp = GetViewport().GetVisibleRect().Size;
         float centerX = _root.Position.X + GetCurrentRootSize().X * 0.5f;
-        return centerX < viewportSize.X * 0.5f ? HiddenDockSide.Left : HiddenDockSide.Right;
+        return centerX < vp.X * 0.5f ? HiddenDockSide.Left : HiddenDockSide.Right;
     }
 
     private void SnapRootIntoViewFromSide()
@@ -724,10 +1194,11 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         if (_root == null)
             return;
 
-        Vector2 viewportSize = GetViewport().GetVisibleRect().Size;
+        Vector2 vp = GetViewport().GetVisibleRect().Size;
         float width = GetCurrentRootSize().X;
-        float margin = 12f;
-        float x = _hiddenSide == HiddenDockSide.Left ? margin : viewportSize.X - width - margin;
+        float x = _hiddenSide == HiddenDockSide.Left
+            ? ViewportMargin
+            : Mathf.Max(ViewportMargin, vp.X - width - ViewportMargin);
         ClampPos(new Vector2(x, _root.Position.Y));
     }
 
@@ -736,78 +1207,48 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         if (_sideTab == null || _root == null)
             return;
 
-        Vector2 viewportSize = GetViewport().GetVisibleRect().Size;
-        float y = Mathf.Clamp(_root.Position.Y + 10f, 0f, Mathf.Max(0f, viewportSize.Y - SideTabHeight));
-        float x = _hiddenSide == HiddenDockSide.Left ? 0f : Mathf.Max(0f, viewportSize.X - SideTabWidth);
+        Vector2 vp = GetViewport().GetVisibleRect().Size;
+        float y = Mathf.Clamp(_root.Position.Y + 10f, 0f, Mathf.Max(0f, vp.Y - SideTabHeight));
+        float x = _hiddenSide == HiddenDockSide.Left ? 0f : Mathf.Max(0f, vp.X - SideTabWidth);
         _sideTab.Position = new Vector2(x, y);
         _sideTab.Size = new Vector2(SideTabWidth, SideTabHeight);
-    }
-
-    private Vector2 GetCurrentRootSize()
-    {
-        if (_root == null)
-            return Vector2.Zero;
-
-        float width = _expanded ? ExpandedWidth : CompactWidth;
-        float height = _root.Size.Y > 0 ? _root.Size.Y : _root.GetCombinedMinimumSize().Y;
-        return new Vector2(width, height);
-    }
-
-    private void QueueLayoutRefresh()
-    {
-        if (_layoutRefreshQueued)
-            return;
-
-        _layoutRefreshQueued = true;
-        Callable.From(RefreshLayoutMetrics).CallDeferred();
-    }
-
-    private void RefreshLayoutMetrics()
-    {
-        _layoutRefreshQueued = false;
-
-        if (_hiddenToSide || _root == null || _bodyScroll == null || _bodyContent == null)
-            return;
-
-        float width = _expanded ? ExpandedWidth : CompactWidth;
-        Vector2 viewportSize = GetViewport().GetVisibleRect().Size;
-        float maxPanelHeight = Mathf.Max(MinPanelHeight, viewportSize.Y - ViewportMargin * 2f);
-        float bodyContentHeight = _bodyContent.GetCombinedMinimumSize().Y;
-        float scrollMinHeight = _bodyScroll.GetCombinedMinimumSize().Y;
-        float fixedHeight = Mathf.Max(0f, _root.GetCombinedMinimumSize().Y - scrollMinHeight);
-        float availableBodyHeight = Mathf.Max(0f, maxPanelHeight - fixedHeight);
-        float bodyHeight = Mathf.Min(bodyContentHeight, availableBodyHeight);
-        float panelHeight = fixedHeight + bodyHeight;
-
-        _bodyScroll.CustomMinimumSize = new Vector2(0, bodyHeight);
-        _root.CustomMinimumSize = new Vector2(width, panelHeight);
-        _root.Size = new Vector2(width, panelHeight);
-
-        int maxScroll = Mathf.Max(0, Mathf.CeilToInt(bodyContentHeight - bodyHeight));
-        if (_resetScrollPending)
-        {
-            _bodyScroll.ScrollVertical = 0;
-            _resetScrollPending = false;
-        }
-        else if (_bodyScroll.ScrollVertical > maxScroll)
-        {
-            _bodyScroll.ScrollVertical = maxScroll;
-        }
-
-        ClampPos(_root.Position);
     }
 
     // ── Icon loader ────────────────────────────────────────────
 
     private static Texture2D? LoadIcon(string? name)
     {
-        if (string.IsNullOrWhiteSpace(name)) return null;
+        if (string.IsNullOrWhiteSpace(name))
+            return null;
+
         string key = name.Trim().ToLowerInvariant().Replace(' ', '_');
-        if (IconCache.TryGetValue(key, out Texture2D? t)) return t;
-        string path = $"res://images/ui/top_panel/character_icon_{key}.png";
-        t = ResourceLoader.Exists(path) ? ResourceLoader.Load<Texture2D>(path) : null;
-        IconCache[key] = t;
-        return t;
+        if (IconCache.TryGetValue(key, out Texture2D? cached))
+        {
+            if (IsResourceAlive(cached))
+                return cached;
+            IconCache.Remove(key);
+        }
+
+        try
+        {
+            string path = $"res://images/ui/top_panel/character_icon_{key}.png";
+            if (!ResourceLoader.Exists(path))
+            {
+                IconCache[key] = null;
+                return null;
+            }
+
+            Texture2D? loaded = ResourceLoader.Load<Texture2D>(path, null, ResourceLoader.CacheMode.Reuse);
+            if (!IsResourceAlive(loaded))
+                return null;
+
+            IconCache[key] = loaded;
+            return loaded;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     // ── Tiny helpers ───────────────────────────────────────────
@@ -825,46 +1266,60 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         return l;
     }
 
-    private static Control HeadLabel(string text, bool expand, int width = 0)
+    private Label HeadLabel(string text, bool expand, float width = 0f)
     {
-        Label l = MakeLabel(text, 10, DimGray);
+        Label l = MakeLabel(text, FS(10f), DimGray);
         if (expand)
         {
             l.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
             l.ClipText = true;
+            l.CustomMinimumSize = new Vector2(NameMin, 0f);
         }
         else
         {
-            l.CustomMinimumSize = new Vector2(width, 0);
+            l.CustomMinimumSize = new Vector2(width, 0f);
             l.HorizontalAlignment = HorizontalAlignment.Right;
         }
         return l;
     }
 
-    private static Control StatCell(string val, Color color, int width)
+    private static Label StatCell(string val, Color color, float width, int fontSize)
     {
-        Label l = MakeLabel(val, 13, color);
-        l.CustomMinimumSize = new Vector2(width, 0);
+        Label l = MakeLabel(val, fontSize, color);
+        l.CustomMinimumSize = new Vector2(width, 0f);
         l.HorizontalAlignment = HorizontalAlignment.Right;
+        l.ClipText = true;
         return l;
     }
 
-    private static Control Spacer(int w)
+    private static string FormatCell(decimal value)
     {
-        Control c = new() { CustomMinimumSize = new Vector2(w, 0), MouseFilter = Control.MouseFilterEnum.Ignore };
-        return c;
+        decimal abs = Math.Abs(value);
+        if (abs >= 1_000_000m)
+            return $"{(value / 1_000_000m).ToString("0.#", CultureInfo.InvariantCulture)}M";
+        if (abs >= 10_000m)
+            return $"{(value / 1_000m).ToString("0.#", CultureInfo.InvariantCulture)}k";
+        return RunDamageTrackerService.Format(value);
+    }
+
+    private Control Spacer(float w)
+    {
+        return new Control
+        {
+            CustomMinimumSize = new Vector2(w, 0f),
+            MouseFilter = Control.MouseFilterEnum.Ignore
+        };
     }
 
     private static Control HLine()
     {
-        ColorRect r = new()
+        return new ColorRect
         {
             Color = Border,
-            CustomMinimumSize = new Vector2(0, 1),
+            CustomMinimumSize = new Vector2(0f, 1f),
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
             MouseFilter = Control.MouseFilterEnum.Ignore
         };
-        return r;
     }
 
     private static Color GetCharTheme(string? charName)
@@ -872,7 +1327,8 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
         if (!string.IsNullOrWhiteSpace(charName))
         {
             string key = charName.Trim().ToLowerInvariant().Replace(' ', '_');
-            if (CharTheme.TryGetValue(key, out Color c)) return c;
+            if (CharTheme.TryGetValue(key, out Color c))
+                return c;
         }
         return Gray;
     }
@@ -880,7 +1336,7 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
     private static string Initials(PlayerDamageSnapshot s)
     {
         string src = !string.IsNullOrWhiteSpace(s.CharacterName) ? s.CharacterName : s.DisplayName;
-        string[] p = src.Split(new[] { ' ', '-', '_' }, System.StringSplitOptions.RemoveEmptyEntries);
+        string[] p = src.Split(new[] { ' ', '-', '_' }, StringSplitOptions.RemoveEmptyEntries);
         if (p.Length == 0) return "?";
         if (p.Length == 1) return p[0].Length >= 2 ? p[0][..2].ToUpperInvariant() : p[0].ToUpperInvariant();
         return string.Concat(p[0][0], p[1][0]).ToUpperInvariant();
@@ -888,28 +1344,69 @@ public sealed partial class DamageTrackerOverlay : CanvasLayer
 
     public override void _Process(double _)
     {
-        if (!_pendingCreate) return;
-        _pendingCreate = false;
-        GD.Print("[DamageTracker] _Process: calling EnsureCreated...");
-        EnsureCreated();
+        if (_pendingCreate)
+        {
+            _pendingCreate = false;
+            EnsureCreated();
+        }
+
+        if (_root == null || !IsInstanceValid(_root))
+            return;
+
+        Vector2 vp = GetViewport().GetVisibleRect().Size;
+        if (!Mathf.IsEqualApprox(vp.X, _lastViewportSize.X) || !Mathf.IsEqualApprox(vp.Y, _lastViewportSize.Y))
+        {
+            _lastViewportSize = vp;
+            if (_hiddenToSide)
+            {
+                UpdateSideTabPosition();
+                ClampPos(_root.Position);
+            }
+            else
+            {
+                ApplyLayout();
+            }
+        }
     }
 
     public static void EnsureCreated()
     {
         if (IsInstanceValid(_instance))
-        {
-            GD.Print("[DamageTracker] EnsureCreated: already exists, skipping");
             return;
-        }
+
         if (Engine.GetMainLoop() is not SceneTree tree || tree.Root == null)
         {
-            GD.Print("[DamageTracker] EnsureCreated: game loop not ready, re-scheduling");
             _pendingCreate = true;
             return;
         }
-        GD.Print("[DamageTracker] EnsureCreated: creating overlay now!");
+
         _instance = new DamageTrackerOverlay();
         tree.Root.CallDeferred(Node.MethodName.AddChild, _instance);
+    }
+
+    private sealed partial class GripNode : Control
+    {
+        public override void _Draw()
+        {
+            float x = Size.X;
+            float y = Size.Y;
+            if (x < 8f || y < 8f)
+                return;
+
+            Color color = new("7A8698");
+            float pad = Mathf.Max(2f, x * 0.16f);
+            for (int i = 0; i < 3; i++)
+            {
+                float offset = i * x * 0.26f;
+                DrawLine(new Vector2(x - pad - offset, y - pad), new Vector2(x - pad, y - pad - offset), color, 1.4f);
+            }
+        }
+
+        public override void _Notification(int what)
+        {
+            if (what == (int)NotificationResized)
+                QueueRedraw();
+        }
     }
 
     private enum HiddenDockSide

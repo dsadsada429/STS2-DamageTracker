@@ -2,34 +2,39 @@
 
 [简体中文](README.zh-CN.md)
 
-Damage Tracker is a Slay the Spire 2 mod that shows a draggable in-combat overlay with per-player damage statistics for the current run.
+Damage Tracker is a Slay the Spire 2 mod (community fork based on [BAIGUANGMEI/STS2-DamageTracker](https://github.com/BAIGUANGMEI/STS2-DamageTracker)) that shows a draggable, resizable in-combat overlay with per-player damage statistics for the current run.
 
-The overlay is designed to stay readable during multiplayer combat and now supports:
+The overlay is designed to stay readable during multiplayer combat and supports:
 
-- expanded mode
-- compact mode
+- expanded mode and compact mode
 - side-hidden mode with a small restore tab
-- adaptive height with scrolling when the player list grows
+- free window resizing via a bottom-right drag grip (with separate remembered widths for expanded and compact modes)
+- `Ctrl + Mouse Wheel` UI scaling (`0.7x` – `2.5x`)
+- persistent UI layout settings (position, width, height, scale, and expanded/compact state)
+- adaptive height with scrolling when the player list grows or the viewport resizes
+- resilient teammate row rendering even when character textures unload
 - stable display across consecutive runs
 
-Current version: `0.3.0`
+Current version: `0.4.0`
 
 ## Features
 
 - Track total damage for each player across the current run
 - Track damage dealt in the current combat
-- Track last hit damage
-- Track max hit damage
-- Highlight the currently active player
-- Show player display name, character name, and portrait when available
+- Track last hit damage and max hit damage
+- Highlight the currently active player with character theme colors and damage share bars
+- Show player display name, character name, and portrait when available (gracefully falls back to initials if a texture is unavailable or unloaded)
+- Compact formatting (`k` / `M`) for large numbers in table cells, with full exact stats on row hover tooltips
 - Support drag-and-drop repositioning
+- Support bottom-right grip resizing and `Ctrl + Mouse Wheel` UI scaling (double-click the grip to reset layout defaults)
+- Persist overlay layout (`scale`, `width`, `compact_width`, `height`, `x`, `y`, `expanded`) in `user://damage_tracker_ui.json`
 - Support expanded, compact, and side-hidden UI states
 - Refresh state automatically when combat starts and ends
 - Keep the overlay stable across multiple back-to-back runs
 
 ## Installation
 
-Download the latest release from the [Releases](https://github.com/BAIGUANGMEI/STS2-DamageTracker/releases) page and extract it into the game's `mods` folder.
+Download the latest release from the [Releases](https://github.com/dsadsada429/STS2-DamageTracker/releases) page and extract it into the game's `mods` folder.
 
 Included files:
 
@@ -51,33 +56,39 @@ Slay the Spire 2/
 ## Usage
 
 - Enter a combat to create the overlay
-- Drag the panel with the left mouse button
-- Use the top-right toggle button to switch between expanded and compact mode
-- Use the side-hide button to collapse the panel to the left or right screen edge
-- Click the side tab to restore the panel
-- When there are many players, the panel height adapts automatically and the list becomes scrollable
+- Drag the panel with the left mouse button to reposition it (position is saved automatically)
+- Drag the bottom-right corner grip to resize the panel width and height
+- Double-click the bottom-right corner grip to reset scale, width, and height to defaults
+- Hold `Ctrl` and scroll the mouse wheel over the panel to scale the UI (`0.7x` – `2.5x`)
+- Hover over any player row to view exact un-abbreviated damage statistics
+- Use the top-right toggle button (`▼` / `▶`) to switch between expanded and compact mode
+- Use the side-hide button (`»` / `«`) to collapse the panel to the left or right screen edge, and click the side tab to restore it
+- When there are many players or the panel height is reduced, the list becomes scrollable automatically
 
 ## Damage Tracking Rules
 
 - Direct damage is recorded from the game's actual `DamageResult.UnblockedDamage`
 - Poison damage is tracked from actual resolved damage events rather than predicted stack values
 - Doom damage is tracked only from the actual Doom kill flow and uses the target's HP before death
-- Player ownership is resolved through typed STS2 APIs first, with reflection fallback when needed
+- Player ownership is resolved through typed STS2 APIs first (with hash-code fallback when `NetId == 0`), and reflection fallback when needed
 
 ## Technical Notes
 
 - Harmony is used to patch STS2 hooks and selected power methods
 - The UI is rendered through a Godot `CanvasLayer`
 - Run identity is based on `RunState.Rng.StringSeed`
+- Run damage state is saved to `user://damage_tracker_state.json`, and overlay layout settings are saved to `user://damage_tracker_ui.json`
 - The tracker seeds known players at run/combat start so the overlay does not depend on who acts first
+- Cached and runtime `Texture2D` instances are validated before binding, and per-row rendering is isolated with a fallback row so unloaded textures never drop teammates from the table
 
 ## Project Structure
 
 - `src/ModEntry.cs`: mod entry point and Harmony patch registration
 - `src/RunDamageTrackerService.cs`: damage aggregation and state management
 - `src/ReflectionHelpers.cs`: runtime object and player ownership resolution helpers
-- `src/DamageTrackerOverlay.cs`: overlay UI
+- `src/DamageTrackerOverlay.cs`: overlay UI, resizing, scaling, layout persistence, and resilient rendering
 - `DamageTracker.csproj`: project file and game reference configuration
+- `DamageTracker.json`: STS2 mod metadata
 - `mod_manifest.json`: mod manifest
 - `project.godot`: Godot project configuration
 
@@ -128,6 +139,15 @@ Slay the Spire 2\mods\DamageTracker\
 
 ## Changelog
 
+### v0.4.0
+
+- Added resizable overlay window via bottom-right drag grip (with double-click to reset defaults)
+- Added `Ctrl + Mouse Wheel` UI scaling (`0.7x` – `2.5x`) with automatic UI rebuild
+- Added persistent UI layout settings (`user://damage_tracker_ui.json`) remembering scale, expanded/compact widths, height, position, and expanded state
+- Fixed teammate rows disappearing when character/portrait textures unload mid-run by validating `Texture2D` lifetimes, evicting stale icon cache entries, and isolating per-row errors with a fallback row
+- Added compact number formatting (`k` / `M`), ellipsis text truncation, hover tooltips with exact numbers, and automatic viewport resize handling
+- Fixed player key fallback when `Player.NetId == 0` to avoid collisions in offline/local sessions
+
 ### v0.3.0
 
 - Fixed missing overlay rows after starting a new run following a previous one
@@ -152,11 +172,11 @@ Use `0.3.0` or later. The tracker now seeds known players at run/combat start an
 
 ### Player names or portraits are missing
 
-The mod prefers platform/player data from the game runtime and falls back to reflection-based resolution. If the game updates internal fields, `ReflectionHelpers.cs` may need adjustment.
+The mod prefers platform/player data from the game runtime and falls back to reflection-based resolution. If a character texture unloads or is unavailable, the overlay safely falls back to colored initials. If the game updates internal fields, `ReflectionHelpers.cs` may need adjustment.
 
-### The panel layout is not ideal for your setup
+### Resetting overlay position, size, or scale
 
-Adjust sizes, spacing, colors, or behavior in `src/DamageTrackerOverlay.cs`.
+Double-click the bottom-right resize grip to reset scale, width, and height, or edit/delete `damage_tracker_ui.json` in the game's user data directory while the game is closed.
 
 ## Development Notes
 

@@ -192,6 +192,10 @@ internal static class ReflectionHelpers
             try
             {
                 ulong typedPlayerKey = typedPlayer.NetId;
+                if (typedPlayerKey == 0)
+                {
+                    typedPlayerKey = (ulong)RuntimeHelpers.GetHashCode(typedPlayer);
+                }
                 string typedDisplayName = TryGetPlatformDisplayName(typedPlayerKey)
                     ?? typedPlayer.Creature.Name
                     ?? typedPlayer.Character.Title?.ToString()
