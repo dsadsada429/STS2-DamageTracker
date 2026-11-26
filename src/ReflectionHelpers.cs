@@ -654,11 +654,25 @@ internal static class ReflectionHelpers
                 return null;
             }
 
-            string? personaName = PlatformUtil.GetPlayerName(platformType, playerKey);
+            ulong lookupId = playerKey;
+            bool isSingleplayer = RunManager.Instance?.IsSingleplayerOrFakeMultiplayer == true;
+            if (isSingleplayer || playerKey <= 1)
+            {
+                if (isSingleplayer && playerKey != 1)
+                {
+                    return null;
+                }
 
-            if (string.IsNullOrWhiteSpace(personaName)
-                || string.Equals(personaName, "[unknown]", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(personaName, playerKey.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal))
+                lookupId = PlatformUtil.GetLocalPlayerId(platformType);
+                if (lookupId == 0)
+                {
+                    return null;
+                }
+            }
+
+            string? personaName = PlatformUtil.GetPlayerNameRaw(platformType, lookupId)?.Trim();
+
+            if (IsInvalidPlatformName(personaName, lookupId, playerKey))
             {
                 return null;
             }
@@ -669,6 +683,17 @@ internal static class ReflectionHelpers
         {
             return null;
         }
+    }
+
+    private static bool IsInvalidPlatformName(string? name, ulong lookupId, ulong playerKey)
+    {
+        return string.IsNullOrWhiteSpace(name)
+            || string.Equals(name, "[unknown]", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(name, "unknown", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(name, "unknownuser", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(name, "unknown user", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(name, lookupId.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal)
+            || string.Equals(name, playerKey.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal);
     }
 
     private static object? TryGetMemberValue(object? source, string memberName)
